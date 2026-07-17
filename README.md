@@ -8,7 +8,7 @@ We used carla to simulate the scheduling algorithm in a city environment to dete
 
 The repository is divided into two parts: `ROVER` and `CARLA`.
 
-## **Carla**
+## **CARLA**
 {TBD}
 
 
