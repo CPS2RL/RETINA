@@ -14,7 +14,7 @@ This CARLA folder has the code used to test RETINA against fixed-model versions 
 The model/ folder holds the ten ShuffleNetV2-GRU-TemporalAttention model files used by the three RETINA scripts. Only RETINA.py, RETINA-HIGH.py, and RETINA-LOW.py use these files. CAMOT.py does not need them, since CA-MOT uses a YOLOv5 detector and a simple OS-Net-style feature extractor instead.
 
 All four scripts need yolov5n.pt to detect objects. You need to download the pretrained YOLOv5n from the official Ultralytics repo.
-# Dependencies
+### Dependencies
 
 Install the required packages before running any script:
 
