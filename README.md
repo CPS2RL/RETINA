@@ -20,8 +20,6 @@ Install the required packages before running any script:
 pip install carla torch torchvision opencv-python numpy gurobipy
 ```
 
-Note: `gurobipy` is only needed for `RETINA.py` (it solves the per-cycle scheduling problem with Gurobi). `RETINA-HIGH.py`, `RETINA-LOW.py`, and `CAMOT.py` do not use it. Gurobi also requires a license; a free academic license is available from gurobi.com.
-
 ## **ROVER**
 
 In the hardware experiment, we have trained the YOLO model offline and put it in the ROVER folder. It is recommended to profile the prediction models on the hardware before running. Profiling can be done using the `profile_behavior_models.py`. Result should be saved in file `config.py` (line 71,134). In file `config.py` line (11,16) consists the scheduling algorithm, uncomment the desried one and comment others before running. Use the `main.py` to do the experiment.
