@@ -9,8 +9,20 @@ We used carla to simulate the scheduling algorithm in a city environment to dete
 The repository is divided into two parts: `ROVER` and `CARLA`.
 
 ## **CARLA**
-{TBD}
+This CARLA folder has the code used to test RETINA against fixed-model versions and CA-MOT. All four scripts use the same CARLA scene, camera setup, and pedestrian/vehicle spawn settings, so the results can be fairly compared.
 
+The model/ folder holds the ten ShuffleNetV2-GRU-TemporalAttention model files used by the three RETINA scripts. Only RETINA.py, RETINA-HIGH.py, and RETINA-LOW.py use these files. CAMOT.py does not need them, since CA-MOT uses a YOLOv5 detector and a simple OS-Net-style feature extractor instead.
+
+All four scripts need yolov5n.pt to detect objects. You need to download the pretrained YOLOv5n from the official Ultralytics repo.
+# Dependencies
+
+Install the required packages before running any script:
+
+```bash
+pip install carla torch torchvision opencv-python numpy gurobipy
+```
+
+Note: `gurobipy` is only needed for `RETINA.py` (it solves the per-cycle scheduling problem with Gurobi). `RETINA-HIGH.py`, `RETINA-LOW.py`, and `CAMOT.py` do not use it. Gurobi also requires a license; a free academic license is available from gurobi.com.
 
 ## **ROVER**
 
