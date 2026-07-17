@@ -11,9 +11,7 @@ The repository is divided into two parts: `ROVER` and `CARLA`.
 ## **CARLA**
 This CARLA folder has the code used to test RETINA against fixed-model versions and CA-MOT. All four scripts use the same CARLA scene, camera setup, and pedestrian/vehicle spawn settings, so the results can be fairly compared.
 
-The model/ folder holds the ten ShuffleNetV2-GRU-TemporalAttention model files used by the three RETINA scripts. Only `RETINA.py`, `RETINA-HIGH.py`, and `RETINA-LOW.py` use these files. `CAMOT.py` does not need them, since CA-MOT uses a YOLOv5 detector and a simple OS-Net-style feature extractor instead.
-
-All four scripts need yolov5n.pt to detect objects. You need to download the pretrained YOLOv5n from the official Ultralytics repo.
+The model/ folder holds the ten ShuffleNetV2-GRU-TemporalAttention model files used by the three RETINA scripts. All four scripts need yolov5n.pt to detect objects. You need to download the pretrained YOLOv5n from the official Ultralytics repo.
 ### Dependencies
 
 Install the required packages before running any script:
