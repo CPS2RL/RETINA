@@ -1,197 +1,263 @@
-# profile_behavior_models.py
-
+import re
 import time
-import csv
-import torch
-import cv2
 from pathlib import Path
 
-from config import (
-    IMAGE_DIR,
-    NUM_FRAMES,
-    MODEL_REGISTRY,
-    LOG_DIR,
-)
+from PIL import Image
 
-from behavior_stage import load_behavior_model
+import torch
+import torch.nn as nn
+import torchvision.models as models
+from torchvision import transforms
 
 
-def preprocess_image(image_path):
+MODEL_PATHS = [
+    ("0.12 FP32", 0.12, "./models/0.12.pth", False),
+    ("0.12 INT8", 0.12, "./models/0.12-INT8.pth", True),
 
-    image = cv2.imread(str(image_path))
+    ("0.25 FP32", 0.25, "./models/0.25.pth", False),
+    ("0.25 INT8", 0.25, "./models/0.25-INT8.pth", True),
 
-    if image is None:
-        raise RuntimeError(f"Could not read image: {image_path}")
+    ("0.50 FP32", 0.50, "./models/0.5.pth", False),
+    ("0.50 INT8", 0.50, "./models/0.5-INT8.pth", True),
 
+    ("0.75 FP32", 0.75, "./models/0.75.pth", False),
+    ("0.75 INT8", 0.75, "./models/0.75-INT8.pth", True),
 
-    image = cv2.cvtColor(
-        image,
-        cv2.COLOR_BGR2RGB,
-    )
-
-    image = (
-        torch.from_numpy(image)
-        .permute(2, 0, 1)
-        .float()
-        / 255.0
-    )
-
-    return image
+    ("1.00 FP32", 1.00, "./models/1.0.pth", False),
+    ("1.00 INT8", 1.00, "./models/1.0-INT8.pth", True),
+]
 
 
-def load_image_sequence():
+IMAGE_DIR = Path("./test_images")
+SEQUENCE_LENGTH = 16
+WARMUP_RUNS = 5
+BENCHMARK_RUNS = 50
 
-    image_paths = sorted(
-        IMAGE_DIR.glob("*.jpg")
-    )
 
-    if len(image_paths) < NUM_FRAMES:
-        raise RuntimeError(
-            f"Need at least {NUM_FRAMES} images in {IMAGE_DIR}, "
-            f"but found {len(image_paths)}"
+class TemporalAttention(nn.Module):
+    def __init__(self, hidden_size, dropout=0.5):
+        super().__init__()
+        self.attn = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_size // 2, 1),
         )
 
-    sequence_paths = image_paths[-NUM_FRAMES:]
+    def forward(self, x):
+        weights = torch.softmax(self.attn(x), dim=1)
+        return (weights * x).sum(dim=1)
+
+
+class ShuffleNetGRU(nn.Module):
+    def __init__(
+        self,
+        width_mult,
+        num_agent_classes=8,
+        num_behavior_classes=7,
+        dropout=0.5,
+    ):
+        super().__init__()
+
+        if width_mult >= 0.75:
+            backbone = models.shufflenet_v2_x1_0(weights=None)
+            hidden_size = 256
+        elif width_mult >= 0.5:
+            backbone = models.shufflenet_v2_x0_5(weights=None)
+            hidden_size = 128
+        else:
+            backbone = models.shufflenet_v2_x0_5(weights=None)
+            hidden_size = 64
+
+        feature_size = backbone.fc.in_features
+
+        self.backbone = nn.Sequential(*list(backbone.children())[:-1])
+        self.pool = nn.AdaptiveAvgPool2d(1)
+
+        self.projection = nn.Sequential(
+            nn.Linear(feature_size, hidden_size),
+            nn.ReLU(inplace=True),
+        )
+
+        self.gru = nn.GRU(
+            input_size=hidden_size,
+            hidden_size=hidden_size,
+            batch_first=True,
+        )
+
+        self.temporal_attn = TemporalAttention(hidden_size, dropout)
+
+        self.fusion = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.ReLU(inplace=True),
+        )
+
+        self.dropout = nn.Dropout(dropout)
+
+        self.agent_head = nn.Sequential(
+            nn.Linear(hidden_size, 64),
+            nn.ReLU(inplace=True),
+            nn.Linear(64, num_agent_classes),
+        )
+
+        self.behavior_head = nn.Sequential(
+            nn.Linear(hidden_size, 128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
+            nn.Linear(128, num_behavior_classes),
+        )
+
+    def forward(self, x):
+        batch_size, sequence_length, channels, height, width = x.shape
+
+        x = x.reshape(
+            batch_size * sequence_length,
+            channels,
+            height,
+            width,
+        )
+
+        x = self.backbone(x)
+        x = self.pool(x).flatten(1)
+        x = self.projection(x)
+        x = x.reshape(batch_size, sequence_length, -1)
+
+        x, _ = self.gru(x)
+        x = self.temporal_attn(x)
+        x = self.fusion(self.dropout(x))
+
+        return self.agent_head(x), self.behavior_head(x)
+
+
+IMAGE_TRANSFORM = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(
+        mean=(0.485, 0.456, 0.406),
+        std=(0.229, 0.224, 0.225),
+    ),
+])
+
+
+def natural_sort_key(path):
+    return [
+        int(part) if part.isdigit() else part.lower()
+        for part in re.split(r"(\d+)", path.name)
+    ]
+
+
+def load_input():
+    image_paths = sorted(
+        IMAGE_DIR.glob("*.jpg"),
+        key=natural_sort_key,
+    )
+
+    if len(image_paths) < SEQUENCE_LENGTH:
+        raise ValueError(
+            f"Expected at least {SEQUENCE_LENGTH} JPG images, "
+            f"found {len(image_paths)}."
+        )
 
     frames = []
 
-    for path in sequence_paths:
-        frame = preprocess_image(path)
-        frames.append(frame)
+    for path in image_paths[:SEQUENCE_LENGTH]:
+        with Image.open(path) as image:
+            frames.append(IMAGE_TRANSFORM(image.convert("RGB")))
 
-    sequence = torch.stack(frames)
-
-    sequence = sequence.unsqueeze(0)
-
-    return sequence, sequence_paths
+    return torch.stack(frames).unsqueeze(0)
 
 
-def profile_model(
-    model,
-    model_name,
-    sequence,
-    warmup_runs=5,
-    test_runs=5,
-):
-
-    model.eval()
-
-    with torch.no_grad():
-
-        for _ in range(warmup_runs):
-            _ = model(sequence)
-
-    runtimes = []
-
-    with torch.no_grad():
-
-        for _ in range(test_runs):
-
-            start = time.perf_counter()
-
-            _ = model(sequence)
-
-            end = time.perf_counter()
-
-            runtime_ms = (end - start) * 1000.0
-
-            runtimes.append(runtime_ms)
-
-    avg_ms = sum(runtimes) / len(runtimes)
-    min_ms = min(runtimes)
-    max_ms = max(runtimes)
-
+def clean_state_dict(state):
     return {
-        "model": model_name,
-        "runs": test_runs,
-        "avg_ms": round(avg_ms, 2),
-        "min_ms": round(min_ms, 2),
-        "max_ms": round(max_ms, 2),
+        key.removeprefix("module.").removeprefix("_orig_mod."): value
+        for key, value in state.items()
     }
 
 
-def main():
-
-    LOG_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
+def load_model(model_path, width_mult, int8=False):
+    checkpoint = torch.load(
+        model_path,
+        map_location="cpu",
+        weights_only=True,
     )
 
-    print("\nLoading image sequence from:")
-    print(IMAGE_DIR)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        checkpoint = checkpoint["model_state_dict"]
 
-    sequence, sequence_paths = load_image_sequence()
+    state = clean_state_dict(checkpoint)
 
-    print("\nImages used for profiling:")
+    model = ShuffleNetGRU(width_mult=width_mult)
 
-    for p in sequence_paths:
-        print(p.name)
+    model_state = model.state_dict()
 
-    print("\nInput tensor shape:")
-    print(sequence.shape)
+    compatible_state = {
+        key: value
+        for key, value in state.items()
+        if (
+            key in model_state
+            and isinstance(value, torch.Tensor)
+            and value.shape == model_state[key].shape
+        )
+    }
 
-    results = []
 
-    for item in MODEL_REGISTRY:
+    model_state.update(compatible_state)
+    model.load_state_dict(model_state)
+    model.eval()
+    model.cpu()
 
-        model_name = item["name"]
-        model_path = item["path"]
 
-        print("\n====================================")
-        print(f"Profiling Model: {model_name}")
-        print("====================================")
 
-        model = load_behavior_model(
-            str(model_path)
+    if int8:
+        try:
+            model = torch.ao.quantization.quantize_dynamic(
+                model,
+                qconfig_spec={nn.Linear, nn.GRU},
+                dtype=torch.qint8,
+                inplace=False,
+            )
+            model.eval()
+
+        except Exception as exc:
+            print(f"  [WARN] INT8 quantization failed: {exc}")
+            print("  [WARN] Continuing with the FP32 model.")
+            model = model.cpu().eval()
+
+    return model
+
+
+@torch.inference_mode()
+def measure_p95(model, input_tensor):
+    for _ in range(WARMUP_RUNS):
+        model(input_tensor)
+
+    latencies = []
+
+    for _ in range(BENCHMARK_RUNS):
+        start = time.perf_counter_ns()
+        model(input_tensor)
+        latencies.append(
+            (time.perf_counter_ns() - start) / 1_000_000
         )
 
-        result = profile_model(
-            model=model,
-            model_name=model_name,
-            sequence=sequence,
-            warmup_runs=5,
-            test_runs=5,
+    return torch.quantile(
+        torch.tensor(latencies),
+        0.95,
+    ).item()
+
+
+def main():
+    input_tensor = load_input().cpu()
+
+    for label, width_mult, model_path, int8 in MODEL_PATHS:
+        model = load_model(
+            model_path=model_path,
+            width_mult=width_mult,
+            int8=int8,
         )
 
-        results.append(result)
-
-        print(f"Average Runtime : {result['avg_ms']} ms")
-        print(f"Min Runtime     : {result['min_ms']} ms")
-        print(f"Max Runtime     : {result['max_ms']} ms")
-
-    csv_path = LOG_DIR / "behavior_model_profile.csv"
-
-    with open(csv_path, "w", newline="") as f:
-
-        writer = csv.DictWriter(
-            f,
-            fieldnames=[
-                "model",
-                "runs",
-                "avg_ms",
-                "min_ms",
-                "max_ms",
-            ],
-        )
-
-        writer.writeheader()
-        writer.writerows(results)
-
-    print("\n====================================")
-    print("FINAL PROFILING RESULTS")
-    print("====================================")
-
-    for r in results:
-        print(
-            f"{r['model']:<25} "
-            f"Avg: {r['avg_ms']:>8.2f} ms | "
-            f"Min: {r['min_ms']:>8.2f} ms | "
-            f"Max: {r['max_ms']:>8.2f} ms"
-        )
-
-    print("\nSaved CSV:")
-    print(csv_path)
-
+        p95_ms = measure_p95(model, input_tensor)
+        print(f"{label},{p95_ms:.3f}")
 
 if __name__ == "__main__":
     main()
