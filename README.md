@@ -25,3 +25,33 @@ pip install carla torch torchvision opencv-python numpy gurobipy
 In the hardware experiment, we have trained the YOLO model offline and put it in the ROVER folder. It is recommended to profile the prediction models on the hardware before running. Profiling can be done using the `profile_behavior_models.py`. Result should be saved in file `config.py` (line 71,134). In file `config.py` line (11,16) consists the scheduling algorithm, uncomment the desried one and comment others before running. Use the `main.py` to do the experiment.
 
 Install the necessary python library listed in `requirements.txt`.
+
+---
+
+## **Running the Experiments**
+
+**Experiment: Solver Overhead**
+
+>cd RETINA/Exp_ Solver Overhead/    \
+python3 solver_overhead.py
+
+Output: RETINA/Exp_ Solver Overhead/solver_overhead/
+
+---
+
+## **Reproducing the Results**
+
+Running all the experiments may take a significant amount of time. For convenience, we provide the output files in each experiment directory. These output files can be used to regenerate results reported in the paper.
+
+**Experiment: Solver Overhead**
+
+In this we have measured the solver overhead by varying number of jobs, model configurations and deadline. The number of jobs varies from 1 to 30 and model configurations is varied as 5, 10 and 15.
+
+To reproduce the results corresponding to Fig. 12(a)-(b), run:
+
+>python3 plot_overhead_D150.py   \
+python3 plot_overhead_D200.py   \
+
+The generated figures will be saved in:
+
+Output: RETINA/Exp_ Solver Overhead/
