@@ -32,8 +32,12 @@ Install the necessary python library listed in `requirements.txt`.
 
 **Experiment: Solver Overhead**
 
+In this experiment we measure the time to the problem in RETINA. To have an idea of the solve time we have meassured the average solver overhead by varying number of jobs, model configurations and deadline. Additionally, the P95th solve time and well as the max solve time can be measured. Uncomment line (130,140) in `solver_overhead.py` to do so.
+
 >cd RETINA/Exp_ Solver Overhead/    \
 python3 solver_overhead.py
+
+Two kind of csv files will be save. One contains solve time for all iteration, and for convenience a summary csv file is also saved.
 
 Output: RETINA/Exp_ Solver Overhead/solver_overhead/
 
@@ -50,7 +54,7 @@ In this we have measured the solver overhead by varying number of jobs, model co
 To reproduce the results corresponding to Fig. 12(a)-(b), run:
 
 >python3 plot_overhead_D150.py   \
-python3 plot_overhead_D200.py   \
+python3 plot_overhead_D200.py   
 
 The generated figures will be saved in:
 
