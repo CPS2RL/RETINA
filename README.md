@@ -6,34 +6,28 @@
 
 - [How to use the code?](#how-to-use-the-code?)
 - [CARLA](#carla)
-- [ROVER](#rover)
 - [Installing Carla Package](#installing-carla-package)
 - [Running the Experiments](#running-the-experiments)
 - [Reproducing the Results](#reproducing-the-results)
+- [Hardware Feasibility Test](#hardware-feasibility-test)
+
 
 ## **How to use the code?**
 
-We used carla to simulate the scheduling algorithm in a city environment to determine safety and temporal gurantee of the system (`CARLA`). To proof the feasibility of the system on real hardware, we tested on a robot hardware (`ROVER`).
-
-The repository is divided into two parts: `ROVER` and `CARLA`.
+We used carla to simulate the scheduling algorithm in a city environment to determine safety and temporal gurantee of the system (`CARLA`). To proof the feasibility of the system on real hardware, we tested on a robot hardware (`Hardware Feasibility Test`).
 
 ## **CARLA**
 This CARLA folder has the code used to test RETINA against fixed-model versions and CA-MOT. All four scripts use the same CARLA scene, camera setup, and pedestrian/vehicle spawn settings, so the results can be fairly compared.
 
 The model/ folder holds the ten ShuffleNetV2-GRU-TemporalAttention model files used by the three RETINA scripts. All four scripts need yolov5n.pt to detect objects. You need to download the pretrained YOLOv5n from the official Ultralytics repo.
-### Dependencies
+
+**Dependencies**
 
 Install the required packages before running any script:
 
 ```bash
 pip install carla torch torchvision opencv-python numpy gurobipy
 ```
-
-## **ROVER**
-
-In the hardware experiment, we have trained the YOLO model offline and put it in the ROVER folder. It is recommended to profile the prediction models on the hardware before running. Profiling can be done using the `profile_behavior_models.py`. Result should be saved in file `config.py` (line 71,134). In file `config.py` line (11,16) consists the scheduling algorithm, uncomment the desried one and comment others before running. Use the `main.py` to do the experiment.
-
-Install the necessary python library listed in `requirements.txt`.
 
 ---
 
@@ -68,6 +62,8 @@ python -m pip install -r requirements.txt
 
 >cd path_to_RETINA\CARLA
 python .\RETINA.py
+
+---
 
 ## **Running the Experiments**
 
@@ -143,3 +139,13 @@ python3 plot_safe_D250.py
 The generated figures will be saved in:
 
 Output: RETINA/Exp_Safe_vs_Unsafe/
+
+---
+
+## **Hardware Feasibility Test**
+
+To perform the hardware evaluation, we used the rover from [here](https://www.waveshare.com/product/ugv01.htm). On top of it, we mounted a camera sensor from [here](https://www.waveshare.com/product/robotics/robot-arm-control/pan-tilt-control/2-axis-pan-tilt-camera-module.htm). A testbed is designed by placing toy road tapes, cars and humanoid figures. Load the code from `RETINA/ROVER` to the robot and perform the hardware feasiblity test.
+
+In the hardware experiment, we have trained the YOLO model offline and put it in the ROVER folder. It is recommended to profile the prediction models on the hardware before running. Profiling can be done using the `profile_behavior_models.py`. Result should be saved in file `config.py` (line 71,134). In file `config.py` line (11,16) consists the scheduling algorithm, uncomment the desried one and comment others before running. Use the `main.py` to do the rover simulation.
+
+Install the necessary python library listed in `requirements.txt`.
