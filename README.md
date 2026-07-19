@@ -35,7 +35,7 @@ The model/ folder holds the ten ShuffleNetV2-GRU-TemporalAttention model files u
 Install the required packages before running any script:
 
 ```bash
-pip install carla torch torchvision opencv-python numpy gurobipy
+pip install carla torch torchvision opencv-python numpy
 ```
 
 ---
@@ -107,9 +107,11 @@ Place the downloaded `yolov5n.pt` file directly inside the `CARLA/` folder, at t
 
 ## **Optimizer Setup**
 
-We have formulated an ILP-based scheduler for RETINA. For the optimization module, we use Gurobi to solve the ILP model. **A Gurobi license is required to run `RETINA.py`.**
+We have formulated an ILP-based scheduler for RETINA. For the optimization module, we use Gurobi to solve the ILP model.
 
-Without installing a license, `gurobipy` (installed via `pip install gurobipy`) ships with a free, size-limited trial license that can solve models with **up to 2000 variables and 2000 constraints**. Since RETINA's ILP has roughly `(number of detected objects) x (number of models in the portfolio)` binary variables per cycle, this trial license may be sufficient for small test scenes, but can fail with a "Model too large for size-limited license" error on larger/denser scenes.
+```bash
+pip install gurobipy
+```
 
 A full Gurobi license can be installed by following the instructions here:
 [How do I retrieve and set up a Gurobi license?](https://support.gurobi.com/hc/en-us/articles/12872879801105-How-do-I-retrieve-and-set-up-a-Gurobi-license)
