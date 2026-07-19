@@ -50,6 +50,15 @@ python3 urgent_non_urgent.py
 
 Output files are saved in the same directory.
 
+**Experiment: Safe Jobs**
+
+In this experiment, we measure the number of jobs that are safe served by different algorithms while varying the deadline. 
+
+>cd RETINA/Exp_Safe_vs_Unsafe/    \
+python3 safe.py
+
+Output files are saved in the same directory.
+
 ---
 
 ## **Reproducing the Results**
@@ -81,3 +90,15 @@ python3 plot_percentage_D190.py
 The generated figures will be saved in:
 
 Output: RETINA/Exp_Urgent_vs_Non_urgent/
+
+**Experiment: Safe Jobs**
+
+To reproduce the results corresponding to Fig. 14(a)-(b), run:
+
+>cd RETINA/Exp_Safe_vs_Unsafe/    \
+python3 plot_safe_D200.py   \
+python3 plot_safe_D250.py   
+
+The generated figures will be saved in:
+
+Output: RETINA/Exp_Safe_vs_Unsafe/
