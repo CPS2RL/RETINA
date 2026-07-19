@@ -7,6 +7,7 @@
 - [How to use the code?](#how-to-use-the-code?)
 - [CARLA](#carla)
 - [Installing Carla Package](##installing-carla-package)
+- [Downloading Pretrained YOLOv5n Weights](##downloading-pretrained-yolov5n-weights)
 - [Running the Experiments](##running-the-experiments)
     - [Scheduler Behavior Under Deadline](##experiment:_scheduler_behavior_under_deadline)
     - [Per-Object Model Selection Over Time](##experiment:_per-object_model_selection_over_time)
@@ -69,6 +70,37 @@ python -m pip install -r requirements.txt
 
 >cd path_to_RETINA\CARLA
 python .\RETINA.py
+
+---
+
+## **Downloading Pretrained YOLOv5n Weights**
+
+All four CARLA scripts (`RETINA.py`, `RETINA-HIGH.py`, `RETINA-LOW.py`, `CAMOT.py`) use YOLOv5n for object detection, loaded locally via:
+
+```python
+torch.hub.load('./yolov5', 'custom', path='yolov5n.pt', source='local')
+```
+
+This means the code expects (1) a local clone of the official YOLOv5 repo and (2) the `yolov5n.pt` weights file, both placed inside the `CARLA/` folder alongside the scripts.
+
+**1. Clone the official YOLOv5 repo into the `CARLA/` folder**
+
+>cd path_to_RETINA\CARLA \
+git clone https://github.com/ultralytics/yolov5.git \
+cd yolov5 \
+pip install -r requirements.txt
+
+**2. Download the pretrained `yolov5n.pt` weights**
+
+Download `yolov5n.pt` directly from the official Ultralytics YOLOv5 releases page:
+
+[https://github.com/ultralytics/yolov5/releases](https://github.com/ultralytics/yolov5/releases)
+
+(Look under the **Assets** section of the latest release and download `yolov5n.pt`.)
+
+Place the downloaded `yolov5n.pt` file directly inside the `CARLA/` folder, at the same level as `RETINA.py`, `RETINA-HIGH.py`, `RETINA-LOW.py`, and `CAMOT.py`.
+
+**Note:** if `yolov5n.pt` is missing, `torch.hub.load(..., source='local')` will fail since it cannot fetch weights from the internet in local mode. Make sure the file is downloaded and placed correctly before running any of the four scripts.
 
 ---
 
