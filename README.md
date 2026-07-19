@@ -39,7 +39,16 @@ python3 solver_overhead.py
 
 Two kind of csv files will be save. One contains solve time for all iteration, and for convenience a summary csv file is also saved.
 
-Output: RETINA/Exp_ Solver Overhead/solver_overhead/
+Output: RETINA/Exp_Solver_Overhead/solver_overhead/
+
+**Experiment: Urgent and Non-urgent Jobs Percentage**
+
+In this experiment, we measure the the urgent and non-urgent jobs (%) while varying the deadline. 
+
+>cd RETINA/Exp_Urgent_vs_Non_urgent/    \
+python3 urgent_non_urgent.py
+
+Output files are saved in the same directory.
 
 ---
 
@@ -59,3 +68,10 @@ python3 plot_overhead_D200.py
 The generated figures will be saved in:
 
 Output: RETINA/Exp_ Solver Overhead/
+
+**Experiment: Urgent and Non-urgent Jobs Percentage**
+
+To reproduce the results corresponding to Fig. 13(a)-(b), run:
+
+>python3 plot_percentage_D150.py   \
+python3 plot_percentage_D190.py   
