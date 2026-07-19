@@ -62,16 +62,22 @@ In this we have measured the solver overhead by varying number of jobs, model co
 
 To reproduce the results corresponding to Fig. 12(a)-(b), run:
 
->python3 plot_overhead_D150.py   \
+>cd RETINA/Exp_ Solver Overhead/    \
+python3 plot_overhead_D150.py   \
 python3 plot_overhead_D200.py   
 
 The generated figures will be saved in:
 
-Output: RETINA/Exp_ Solver Overhead/
+Output: RETINA/Exp_Solver_Overhead/
 
 **Experiment: Urgent and Non-urgent Jobs Percentage**
 
 To reproduce the results corresponding to Fig. 13(a)-(b), run:
 
->python3 plot_percentage_D150.py   \
+>cd RETINA/Exp_Urgent_vs_Non_urgent/    \
+python3 plot_percentage_D150.py   \
 python3 plot_percentage_D190.py   
+
+The generated figures will be saved in:
+
+Output: RETINA/Exp_Urgent_vs_Non_urgent/
