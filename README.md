@@ -121,7 +121,7 @@ If you are an academic user, you can request a free academic license here:
 
 Make sure the license is installed inside the same Python environment used to run `RETINA.py` (e.g., the same conda environment created for CARLA above).
 
-**Compatibility note:** the CARLA setup above uses a Python 3.7 conda environment. Recent `gurobipy` releases require Python 3.10 or newer, so installing the latest `gurobipy` into that same Python 3.7 environment may fail. If you hit this, either install an older `gurobipy` release compatible with Python 3.7, or set up a separate, newer Python environment for running `RETINA.py`.
+**Compatibility note:** CARLA setup above uses a Python 3.7 conda environment. Recent `gurobipy` releases require Python 3.10 or newer, so installing the latest `gurobipy` into that same Python 3.7 environment may fail. If you hit this, either install an older `gurobipy` release compatible with Python 3.7, or set up a separate, newer Python environment for running `RETINA.py`.
 
 ---
 
