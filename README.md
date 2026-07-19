@@ -45,14 +45,15 @@ Carla Version 0.9.15 can be downloaded from [here](https://github.com/carla-simu
 > .\CarlaUE4.exe
 
 **Install the Python client library**
+
 Create a Conda environment with Python 3.7
 >conda create -n carla python=3.7 \
 conda activate carla \
-cd path_to_carla_package\PythonAPI\carla\dist
-python -m pip install carla-0.9.15-cp37m-manylinux_2_27_x86_64.whl
-python -m pip install carla
-cd path_to_carla_package\PythonAPI\examples\
-python -m pip install -r requirements.txt
+cd path_to_carla_package\PythonAPI\carla\dist   \
+python -m pip install carla-0.9.15-cp37m-manylinux_2_27_x86_64.whl  \
+python -m pip install carla \
+cd path_to_carla_package\PythonAPI\examples\ \
+python -m pip install -r requirements.txt 
 
 **Run a Python client script**
 
