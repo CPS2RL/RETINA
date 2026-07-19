@@ -8,6 +8,7 @@
 - [CARLA](#carla)
 - [Installing Carla Package](##installing-carla-package)
 - [Downloading Pretrained YOLOv5n Weights](##downloading-pretrained-yolov5n-weights)
+- [Optimizer Setup](##optimizer-setup)
 - [Running the Experiments](##running-the-experiments)
     - [Scheduler Behavior Under Deadline](##experiment:_scheduler_behavior_under_deadline)
     - [Per-Object Model Selection Over Time](##experiment:_per-object_model_selection_over_time)
@@ -101,6 +102,24 @@ Download `yolov5n.pt` directly from the official Ultralytics YOLOv5 releases pag
 Place the downloaded `yolov5n.pt` file directly inside the `CARLA/` folder, at the same level as `RETINA.py`, `RETINA-HIGH.py`, `RETINA-LOW.py`, and `CAMOT.py`.
 
 **Note:** if `yolov5n.pt` is missing, `torch.hub.load(..., source='local')` will fail since it cannot fetch weights from the internet in local mode. Make sure the file is downloaded and placed correctly before running any of the four scripts.
+
+---
+
+## **Optimizer Setup**
+
+We have formulated an ILP-based scheduler for RETINA. For the optimization module, we use Gurobi to solve the ILP model. **A Gurobi license is required to run `RETINA.py`.**
+
+Without installing a license, `gurobipy` (installed via `pip install gurobipy`) ships with a free, size-limited trial license that can solve models with **up to 2000 variables and 2000 constraints**. Since RETINA's ILP has roughly `(number of detected objects) x (number of models in the portfolio)` binary variables per cycle, this trial license may be sufficient for small test scenes, but can fail with a "Model too large for size-limited license" error on larger/denser scenes.
+
+A full Gurobi license can be installed by following the instructions here:
+[How do I retrieve and set up a Gurobi license?](https://support.gurobi.com/hc/en-us/articles/12872879801105-How-do-I-retrieve-and-set-up-a-Gurobi-license)
+
+If you are an academic user, you can request a free academic license here:
+[Gurobi Academic License Request](https://portal.gurobi.com/iam/licenses/request/)
+
+Make sure the license is installed inside the same Python environment used to run `RETINA.py` (e.g., the same conda environment created for CARLA above).
+
+**Compatibility note:** the CARLA setup above uses a Python 3.7 conda environment. Recent `gurobipy` releases require Python 3.10 or newer, so installing the latest `gurobipy` into that same Python 3.7 environment may fail. If you hit this, either install an older `gurobipy` release compatible with Python 3.7, or set up a separate, newer Python environment for running `RETINA.py`.
 
 ---
 
