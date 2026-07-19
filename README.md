@@ -2,7 +2,16 @@
 
 *Artifact and code for "Time-Aware Intent Prediction for Autonomous Vehicles using Adaptive Scheduling"*
 
-**How to use the code?**
+## Table of Contents
+
+- [How to use the code?](#how-to-use-the-code?)
+- [CARLA](#carla)
+- [ROVER](#rover)
+- [Installing Carla Package](#installing-carla-package)
+- [Running the Experiments](#running-the-experiments)
+- [Reproducing the Results](#reproducing-the-results)
+
+## **How to use the code?**
 
 We used carla to simulate the scheduling algorithm in a city environment to determine safety and temporal gurantee of the system (`CARLA`). To proof the feasibility of the system on real hardware, we tested on a robot hardware (`ROVER`).
 
