@@ -17,7 +17,7 @@ from torchvision import transforms
 from collections import deque
 from PIL import Image
 
-sys.path.insert(0, './yolov5')   # local YOLOv5 repo checkout (for torch.hub.load)
+sys.path.insert(0, './yolov5')
 
 
 # CONFIGURATION CONSTANTS

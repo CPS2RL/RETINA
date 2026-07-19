@@ -35,19 +35,22 @@ PED_SPREAD_MIN    = 10.0
 PED_SPREAD_MAX    = 120.0
 UNSTICK_INTERVAL  = 3.0
 
-TTC_CRITICAL_SEC  = 2.0
+TTC_CRITICAL_SEC  = 2.0   # objects with TTC below this are "critical"
 
+# Detection input resolution per workload level (Low/Medium/High fidelity)
 DET_SIZE = {'L': 256, 'M': 416, 'H': 672}
 
+# Max detections given a real feature-based re-id match at each level
 ASSOC_MAX_FEAT = {'L': 0, 'M': 3, 'H': 99}
 
+# Profiled worst-case execution times (ms) per level, used by the scheduler
 WCET_DET   = {'L': 43.6,  'M': 53.5,  'H': 67.6}
 WCET_ASSOC = {'L': 11.3,  'M': 74.0,  'H': 125.2}
 
-TASK_PERIOD_MS   = 150.0
+TASK_PERIOD_MS   = 150.0   # per-object tracking task period/deadline
 TASK_DEADLINE_MS = 150.0
 
-CAMOT_SCHEDULER = 'EDF-Slack'
+CAMOT_SCHEDULER = 'EDF-Slack'   # or 'EDF-BE' -- see camot_schedule()
 
 YOLO_CLASS_MAP = {0:"Ped", 1:"Cyc", 2:"Car", 3:"Mobike", 5:"Bus", 7:"LarVeh"}
 YOLO_CLASSES   = list(YOLO_CLASS_MAP.keys())
@@ -91,6 +94,9 @@ yolo_model.classes = YOLO_CLASSES
 print("[YOLO]     Ready")
 
 
+# MobileNetV2-based feature extractor -- produces a 128-d embedding per
+# cropped detection, used for appearance-based re-identification (only
+# actually run for objects scheduled at Medium/High association level).
 class FeatureExtractor(nn.Module):
     def __init__(self):
         super().__init__()
@@ -119,6 +125,8 @@ crop_transform = transforms.Compose([
 
 @torch.no_grad()
 def extract_feature(frame_bgr: np.ndarray, box: tuple) -> Optional[torch.Tensor]:
+    # Crop, preprocess, and embed one detection box -- used only when the
+    # scheduler's chosen association level (M/H) allows a feature match.
     h, w = frame_bgr.shape[:2]
     x1, y1, x2, y2 = map(int, box)
     x1=max(0,x1); y1=max(0,y1); x2=min(w,x2); y2=min(h,y2)
@@ -130,6 +138,8 @@ def extract_feature(frame_bgr: np.ndarray, box: tuple) -> Optional[torch.Tensor]
     return feat_extractor(t).squeeze(0).cpu()
 
 
+# One tracked object across frames (CA-MOT's own tracker state, separate
+# from the ground-truth CARLA actor it corresponds to).
 @dataclass
 class TrackedObject:
     track_id    : int
@@ -139,12 +149,15 @@ class TrackedObject:
     vel         : np.ndarray = field(default_factory=lambda: np.zeros(2))
     box         : Optional[tuple] = None
     feature     : Optional[torch.Tensor] = None
-    feature_age : int = 0
-    pos_age     : int = 0
-    miss_count  : int = 0
+    feature_age : int = 0   # cycles since this track's feature was last refreshed
+    pos_age     : int = 0   # cycles since its position was last updated by a real match
+    miss_count  : int = 0   # consecutive missed frames (dropped after 10, see run_association)
     is_critical : bool = False
 
 
+# Per-object real-time task: tracks how "stale" its detection/association
+# have gotten (age_det/age_assoc), used by determine_options() to decide
+# which fidelity level to bump it to next.
 @dataclass
 class MOTTask:
     actor_id  : int
@@ -162,6 +175,7 @@ class MOTTask:
 
 
 def iou(a: tuple, b: tuple) -> float:
+    # Intersection-over-union of two boxes (position-only association metric)
     ax1,ay1,ax2,ay2 = a; bx1,by1,bx2,by2 = b
     ix1=max(ax1,bx1); iy1=max(ay1,by1)
     ix2=min(ax2,bx2); iy2=min(ay2,by2)
@@ -170,6 +184,8 @@ def iou(a: tuple, b: tuple) -> float:
     return inter/((ax2-ax1)*(ay2-ay1)+(bx2-bx1)*(by2-by1)-inter+1e-6)
 
 def feat_sim(fa: torch.Tensor, fb: torch.Tensor) -> float:
+    # Cosine similarity between two feature embeddings (appearance-based
+    # association metric, used when a track has a stored feature)
     fa=fa/(fa.norm()+1e-6); fb=fb/(fb.norm()+1e-6)
     return float(torch.dot(fa,fb).clamp(0,1))
 
@@ -177,6 +193,9 @@ def feat_sim(fa: torch.Tensor, fb: torch.Tensor) -> float:
 def identify_critical_region(
         tracked: List[TrackedObject],
         ttc_map: Dict[int,float]) -> Optional[Tuple[int,int,int,int]]:
+    # Bounding box enclosing every currently-critical (TTC < threshold)
+    # tracked object -- this is where Low/Medium-level detection crops
+    # the frame to, so critical objects stay covered even at low fidelity.
     boxes = [t.box for t in tracked
              if ttc_map.get(t.actor_id, 999) < TTC_CRITICAL_SEC
              and t.box is not None]
@@ -189,6 +208,12 @@ def identify_critical_region(
 def run_detection(frame: np.ndarray,
                   s_level: str,
                   critical_region: Optional[Tuple]) -> Tuple[List[dict], np.ndarray]:
+    # Runs YOLO at a resolution/crop determined by s_level (detection
+    # fidelity chosen by the scheduler for this cycle):
+    #   'H' -> full frame, resized to DET_SIZE['H']
+    #   'L'/'M' -> only the critical region (or frame center if none yet)
+    #              is cropped and resized -- cheaper but only covers a
+    #              sub-area of the scene.
     fh, fw    = frame.shape[:2]
     tsz       = DET_SIZE[s_level]
     annotated = frame.copy()
@@ -238,6 +263,13 @@ def run_association(frame: np.ndarray,
                     detections: List[dict],
                     tracked: List[TrackedObject],
                     next_tid: List[int]) -> List[TrackedObject]:
+    # Match this cycle's detections to existing tracks, at fidelity f_level:
+    # 1) feature-based match (cosine similarity) for tracks/detections that
+    #    have an embedded feature (limited by ASSOC_MAX_FEAT[f_level])
+    # 2) IoU-based match for anything left unmatched
+    # 3) unmatched tracks get their position extrapolated by last velocity
+    # 4) unmatched detections become new tracks
+    # 5) tracks missed >10 cycles in a row are dropped
     max_feats = ASSOC_MAX_FEAT[f_level]
 
     det_feats: List[Optional[torch.Tensor]] = []
@@ -325,6 +357,8 @@ def run_association(frame: np.ndarray,
 
 
 def is_schedulable(tasks: List[MOTTask]) -> bool:
+    # Rough utilization check at the cheapest (L,L) workload: true if
+    # running every task at minimum fidelity still fits within the period.
     if not tasks: return True
     c_ll = WCET_DET['L'] + WCET_ASSOC['L']
     lhs  = (c_ll / TASK_PERIOD_MS) + len(tasks) * (c_ll / TASK_PERIOD_MS)
@@ -334,6 +368,10 @@ def is_schedulable(tasks: List[MOTTask]) -> bool:
 def slack_edf_slack(task_k: MOTTask,
                     all_tasks: List[MOTTask],
                     t_cur: float) -> float:
+    # EDF-Slack: how much extra execution time task_k can be given (above
+    # the minimum (L,L) cost) without any task with a later deadline
+    # missing its own deadline. Higher slack -> can afford a higher
+    # detection/association fidelity level this cycle.
     c_ll = WCET_DET['L'] + WCET_ASSOC['L']
     if not all_tasks: return 0.0
     d1 = task_k.deadline
@@ -357,12 +395,17 @@ def slack_edf_slack(task_k: MOTTask,
 def slack_edf_be(task_k: MOTTask,
                  active: List[MOTTask],
                  t_cur: float) -> float:
+    # EDF-BE (best-effort): simpler slack estimate, only nonzero when
+    # task_k is the sole active task this cycle (no contention to reason about).
     if len(active) != 1: return 0.0
     c_ll = WCET_DET['L'] + WCET_ASSOC['L']
     return max(0.0, task_k.deadline - t_cur - c_ll)
 
 
 def determine_options(task: MOTTask, slack: float) -> Tuple[str, str]:
+    # Spend available slack on whichever of detection/association is
+    # more stale (higher age_det vs age_assoc), preferring to bump that
+    # one all the way to 'H' if slack allows, else partially upgrade it.
     if slack <= 0:
         return ('L', 'L')
 
@@ -392,6 +435,10 @@ def determine_options(task: MOTTask, slack: float) -> Tuple[str, str]:
 
 def camot_schedule(tasks: List[MOTTask],
                    mode: str) -> List[Tuple[MOTTask,str,str]]:
+    # Order tasks by EDF (earliest deadline first), then for each one
+    # compute its available slack and pick a (detection, association)
+    # fidelity level via determine_options(). t_sim accumulates the
+    # simulated execution time so later tasks in EDF order see less slack.
     if not tasks: return []
     edf   = sorted(tasks, key=lambda t: t.deadline)
     out   = []
@@ -409,10 +456,12 @@ def camot_schedule(tasks: List[MOTTask],
 
 
 def get_dist(a, b) -> float:
+    # Euclidean distance between two CARLA actors
     l1=a.get_location(); l2=b.get_location()
     return math.sqrt((l1.x-l2.x)**2+(l1.y-l2.y)**2+(l1.z-l2.z)**2)
 
 def get_speed(actor) -> float:
+    # Actor speed in m/s
     v=actor.get_velocity()
     return math.sqrt(v.x**2+v.y**2+v.z**2)
 
@@ -421,12 +470,15 @@ def is_on_road(world, loc):
     return wp is not None and wp.lane_type==carla.LaneType.Driving
 
 def nav_sidewalk(world, n=50):
+    # Sample a random pedestrian-navigable point that's off the road
     for _ in range(n):
         loc=world.get_random_location_from_navigation()
         if loc and not is_on_road(world,loc): return loc
     return None
 
 def world_to_pixel(loc, vehicle, fov=90):
+    # Project a 3D world location into the ego camera's pixel space
+    # (pinhole model, camera assumed 2.5m fwd / 1.5m up from vehicle origin)
     vt=vehicle.get_transform(); yaw=math.radians(vt.rotation.yaw)
     cx=vt.location.x+math.cos(yaw)*2.5
     cy_=vt.location.y+math.sin(yaw)*2.5
@@ -440,6 +492,7 @@ def world_to_pixel(loc, vehicle, fov=90):
     return (u,v) if 0<=u<CAM_W and 0<=v<CAM_H else None
 
 def actor_to_det(actor, vehicle, dets, thr=80):
+    # Match a known CARLA actor to a YOLO detection box by pixel projection
     proj=world_to_pixel(actor.get_location(), vehicle)
     if proj is None: return None
     u,v=proj
@@ -450,6 +503,8 @@ def actor_to_det(actor, vehicle, dets, thr=80):
     return None
 
 def compute_ttc(vehicle, actors) -> Dict[int,float]:
+    # TTC approximation per actor: distance / closing speed (blends ego
+    # speed against half the actor's own speed if it's roughly ahead)
     spd=max(get_speed(vehicle),0.5)
     etf=vehicle.get_transform(); ef=etf.get_forward_vector()
     ttc={}
@@ -468,6 +523,9 @@ def compute_ttc(vehicle, actors) -> Dict[int,float]:
 
 
 def spawn_ped(world, bp_lib, vehicle, fwd, beh, idx):
+    # Spawn one pedestrian near a sidewalk point ~fwd metres ahead of ego,
+    # with behaviour 'standing'/'walking'/'crossing' (crossing pedestrians
+    # start stationary; main loop triggers the actual crossing walk later)
     vt=vehicle.get_transform(); yaw=math.radians(vt.rotation.yaw)
     tgt=carla.Location(x=vt.location.x+math.cos(yaw)*fwd,
                        y=vt.location.y+math.sin(yaw)*fwd,
@@ -524,6 +582,8 @@ def spawn_all_peds(world, bp_lib, vehicle):
     return peds
 
 def _valid_road_spawn(cmap, sp):
+    # A usable vehicle spawn point: on a driving lane, not at a junction,
+    # with at least 20m of road ahead
     wp = cmap.get_waypoint(sp.location, project_to_road=True,
                            lane_type=carla.LaneType.Driving)
     return wp is not None and not wp.is_junction and bool(wp.next(20.0))
@@ -575,6 +635,8 @@ def spawn_all_vehicles(world, bp_lib, vehicle, tm):
     return spawned
 
 def unstick(rvehicles, tm, world):
+    # Nudge a vehicle that's been idle >8s and isn't legitimately stopped
+    # (not at a junction, not waiting on a red/yellow light)
     now=time.time(); cmap=world.get_map()
     for rv in rvehicles:
         try:
@@ -605,6 +667,7 @@ def unstick(rvehicles, tm, world):
 def draw_hud(frame, speed, n_dets, n_tracked, n_crit,
              elapsed, brake, state, scheduler,
              avg_age_det, avg_age_assoc, sched_ms, lines):
+    # On-screen overlay: speed/state/counts + per-track scheduling info panel
     if frame is None: return None
     h,w=frame.shape[:2]; d=frame.copy()
     info=[
@@ -636,6 +699,7 @@ def draw_hud(frame, speed, n_dets, n_tracked, n_crit,
     return d
 
 def draw_tracks(frame, tracked, ttc_map):
+    # Draw each track's box (red if critical/TTC<threshold, green otherwise)
     if frame is None: return frame
     d=frame.copy()
     for t in tracked:
@@ -649,6 +713,8 @@ def draw_tracks(frame, tracked, ttc_map):
     return d
 
 def draw_crit_region(frame, reg):
+    # Semi-transparent red overlay marking the critical region used to
+    # crop Low/Medium-fidelity detection (see identify_critical_region)
     if frame is None or reg is None: return frame
     d=frame.copy(); x1,y1,x2,y2=reg
     ov=d.copy()
@@ -661,6 +727,8 @@ def draw_crit_region(frame, reg):
 
 
 def main():
+    # Entry point: sets up CARLA world/ego/sensors/scene, then runs the
+    # detect -> track/associate -> schedule -> brake loop per frame.
     client=carla.Client('localhost',2000); client.set_timeout(10.0)
     world=client.get_world(); bp_lib=world.get_blueprint_library()
     spts=world.get_map().get_spawn_points()
@@ -795,9 +863,11 @@ def main():
             all_actors=([(e['ped'],'Ped') for e in peds]+
                         [(rv['actor'],rv['type']) for rv in rvehicles])
 
+            # TTC per actor (informational + drives critical-region detection)
             ttc_map=compute_ttc(vehicle,[a for a,_ in all_actors])
 
-
+            # Always run a cheap 'L' pass first, just to see which known
+            # actors are currently visible at all (before fidelity scheduling)
             dets_L, display=run_detection(frame,'L',critical_region=None)
 
             visible=[]
@@ -811,6 +881,7 @@ def main():
                 if cv2.waitKey(1)&0xFF==ord('q'): break
                 time.sleep(0.05); continue
 
+            # Ensure every visible actor has a task + track (create on first sight)
             for actor,atype,det in visible:
                 if actor.id not in mot_tasks:
                     mot_tasks[actor.id]=MOTTask(actor_id=actor.id)
@@ -831,6 +902,8 @@ def main():
             if not is_schedulable(tasks_frame):
                 print(f"  [WARN] Not schedulable at C(L,L) n={len(tasks_frame)}")
 
+            # CA-MOT's core scheduling decision: EDF order + per-task
+            # detection/association fidelity level (see camot_schedule)
             t0=time.time()
             schedule=camot_schedule(tasks_frame,CAMOT_SCHEDULER)
             sched_ms=(time.time()-t0)*1000
@@ -845,6 +918,9 @@ def main():
                   f" sched={sched_ms:.1f}ms [{CAMOT_SCHEDULER}]")
             print(f"  {'─'*65}")
 
+            # For each scheduled task, re-run detection/association at its
+            # assigned (s, f) fidelity level and update its track + a rough
+            # accuracy proxy (higher fidelity -> assumed higher accuracy)
             for (task,s,f),(actor,atype,det_l) in zip(schedule,visible):
                 ttc=ttc_map.get(actor.id,999.0)
                 is_crit=ttc<TTC_CRITICAL_SEC
@@ -874,6 +950,10 @@ def main():
 
                 task.record(s,f)
 
+                # Accuracy proxy (no real model here): higher detection/
+                # association fidelity assumed to yield higher accuracy --
+                # used only for CSV logging/comparison against RETINA's
+                # real measured accuracy.
                 acc={'H':1.0,'M':0.85,'L':0.70}[s]+{'H':0.05,'M':0.02,'L':0.0}[f]
                 acc=min(1.0,acc)
                 acc_all.append(acc)
@@ -903,6 +983,9 @@ def main():
                   f" | D(L/M/H)={wl['det']['L']}/{wl['det']['M']}/{wl['det']['H']}"
                   f" A(L/M/H)={wl['assoc']['L']}/{wl['assoc']['M']}/{wl['assoc']['H']}")
 
+            # Simple in-lane proximity/TTC brake check -- independent of
+            # tracking/scheduling; brakes if any visible actor is directly
+            # ahead and either very close or closing fast (TTC<2.5s).
             etf=vehicle.get_transform(); ef=etf.get_forward_vector()
             for actor,_,_ in visible:
                 try:
