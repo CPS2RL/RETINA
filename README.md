@@ -28,6 +28,37 @@ Install the necessary python library listed in `requirements.txt`.
 
 ---
 
+## **Installing Carla Package**
+
+The minimum system requirements for installing CARLA and the official  installation guide can be found
+ [here](https://carla.readthedocs.io/en/latest/start_quickstart/). 
+ However, while installing on Windows 11, we found that the following additional components were required:
+
+- DirectX Runtime [Download Link](https://www.microsoft.com/en-us/download/details.aspx?id=35) 
+-  Microsoft Visual C++ Redistributable [Download Link](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170#latest-supported-redistributable-version). 
+
+ 
+**Download and extract a CARLA package**
+Carla Version 0.9.15 can be downloaded from [here](https://github.com/carla-simulator/carla/releases/tag/0.9.15/).
+
+**Launch the CARLA server**
+> .\CarlaUE4.exe
+
+**Install the Python client library**
+Create a Conda environment with Python 3.7
+>conda create -n carla python=3.7 \
+conda activate carla \
+cd path_to_carla_package\PythonAPI\carla\dist
+python -m pip install carla-0.9.15-cp37m-manylinux_2_27_x86_64.whl
+python -m pip install carla
+cd path_to_carla_package\PythonAPI\examples\
+python -m pip install -r requirements.txt
+
+**Run a Python client script**
+
+>cd path_to_RETINA\CARLA
+python .\RETINA.py
+
 ## **Running the Experiments**
 
 **Experiment: Solver Overhead**
