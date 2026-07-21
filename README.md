@@ -10,10 +10,12 @@
 - [Downloading Pretrained YOLOv5n Weights](##downloading-pretrained-yolov5n-weights)
 - [Optimizer Setup](##optimizer-setup)
 - [Running the Experiments](##running-the-experiments)
+<!--
     - [Scheduler Behavior Under Deadline](##experiment:_scheduler_behavior_under_deadline)
-    - [Per-Object Model Selection Over Time](##experiment:_per-object_model_selection_over_time)
+    - [Per-Object Model Selection Over Time](##experiment:_per-object_model_selection_over_time) -->
     - [Baseline Comparisons](##experiment:_baseline_comparisons)
-    - [Performance Comparisons](##experiment:_performance_comparisons)
+<!--
+    - [Performance Comparisons](##experiment:_performance_comparisons) -->
     - [Solver Overhead](##experiment:_solver_overhead)
     - [Urgent and Non-urgent Jobs Percentage](##experiment:_urgent_and_non-urgent_jobs_percentage)
     - [Safe Jobs](##experiment:_Safe_Jobs)
@@ -127,6 +129,7 @@ Make sure the license is installed inside the same Python environment used to ru
 
 ## **Running the Experiments**
 
+<!--
 **Experiment: Scheduler Behavior Under Deadline**
 
 {TBD}
@@ -134,7 +137,7 @@ Make sure the license is installed inside the same Python environment used to ru
 **Experiment: Per-Object Model Selection Over Time**
 
 {TBD}
-
+-->
 **Experiment: Baseline Comparisons**
 
 >cd path_to_RETINA\CARLA    \
@@ -142,11 +145,11 @@ python .\RETINA.py  \
 python .\CAMOT  \
 python .\RETINA-HIGH    \
 python .\RETINA-LOW
-
+<!--
 **Experiment: Performance Comparisons**
 
 {TBD}
-
+-->
 **Experiment: Solver Overhead**
 
 In this experiment we measure the time to the problem in RETINA. To have an idea of the solve time we have meassured the average solver overhead by varying number of jobs, model configurations and deadline. Additionally, the P95th solve time and well as the max solve time can be measured. Uncomment line (130,140) in `solver_overhead.py` to do so.
@@ -179,7 +182,7 @@ Output files are saved in the same directory.
 ---
 
 ## **Reproducing the Results**
-
+<!--
 **Experiment: Scheduler Behavior Under Deadline**
 
 {TBD}
@@ -195,7 +198,7 @@ Output files are saved in the same directory.
 **Experiment: Performance Comparisons**
 
 {TBD}
-
+-->
 Running all the experiments may take a significant amount of time. For convenience, we provide the output files in each experiment directory. These output files can be used to regenerate results reported in the paper.
 
 **Experiment: Solver Overhead**

@@ -20,8 +20,10 @@ def run_gurobi_experiment(
     model.setParam("OutputFlag", 0)
     model.setParam("Seed", 0)
 
+    # x[job_id, model_id] = 1 when model_id is assigned to job_id.
+    # x[job_id, model_id] = 0 otherwise.
     x = {}
-
+    # Create one binary decision variable for every job-model pair.
     for job_id in range(jobNumber):
 
         for model_id in range(modelNumber):
@@ -33,6 +35,7 @@ def run_gurobi_experiment(
 
     model.update()
 
+     # Maximize the total weighted accuracy of all selected assignments.
     model.setObjective(
 
         gp.quicksum(
@@ -49,6 +52,7 @@ def run_gurobi_experiment(
         GRB.MAXIMIZE
     )
 
+    # Each job is assigned at most one model.
     for job_id in range(jobNumber):
 
         model.addConstr(
@@ -59,6 +63,7 @@ def run_gurobi_experiment(
             ) <= 1
         )
 
+    # Total execution time does not exceed the available deadline.
     model.addConstr(
 
         gp.quicksum(
@@ -72,6 +77,7 @@ def run_gurobi_experiment(
         ) <= Deadline
     )
 
+     # Mandatory job to be assigned exactly one model.
     for mandatory_job in mandatory_job_indices:
 
         model.addConstr(

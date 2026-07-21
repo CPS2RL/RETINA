@@ -8,10 +8,7 @@ import pandas as pd
 from gurobi_optimal import run_gurobi_experiment
 
 
-# =========================================================
 # Synthetic workload generation
-# =========================================================
-
 np.random.seed(0)
 
 max_job_number = 50
@@ -21,10 +18,7 @@ job_weights_all = np.random.uniform(0.5, 2.0, max_job_number)
 position_uncertainty_all = np.random.uniform(0.0, 1.0, max_job_number)
 
 
-# =========================================================
 # Benchmark configuration
-# =========================================================
-
 Deadline_values = range(100, 301, 50)
 modelNumber_values = range(5, 21, 5)
 jobNumber_values = range(1, 31)
@@ -41,10 +35,7 @@ raw_results = defaultdict(list)
 mean_results = defaultdict(list)
 
 
-# =========================================================
 # Benchmark loop
-# =========================================================
-
 for jobNumber in jobNumber_values:
 
     for Deadline in Deadline_values:
@@ -60,10 +51,7 @@ for jobNumber in jobNumber_values:
             accuracy = np.linspace(0.60, 0.90, modelNumber)
             executionTime = np.linspace(10, 15, modelNumber)
 
-            # =================================================
             # Warm-up runs
-            # =================================================
-
             for warmup in range(1, warmup_iterations + 1):
 
                 warmup_model_choice = []
@@ -79,10 +67,7 @@ for jobNumber in jobNumber_values:
                     model_choice=warmup_model_choice,
                 )
 
-            # =================================================
             # Measured runs
-            # =================================================
-
             runtimes_ms = []
             objective = None
 
@@ -141,10 +126,7 @@ for jobNumber in jobNumber_values:
 
 
 
-# =========================================================
 # Store separate CSV files
-# =========================================================
-
 for modelNumber in modelNumber_values:
 
     for Deadline in Deadline_values:

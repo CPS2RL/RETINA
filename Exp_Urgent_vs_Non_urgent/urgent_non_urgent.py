@@ -28,22 +28,25 @@ def main():
 
     rng = np.random.default_rng(3)
 
-    iterations = 1000
+    iterations = 1
 
+    # Ratio of jobs that belong to the mandatory-job group.
     mandatory_probs = np.arange(0.1, 1.0, 0.1)
 
+    # Number of jobs tested in each experiment.
     job_numbers = np.arange(10, 30, 1)
 
-
+    # Deadline values from 110 through 190 with a step size of 20.
     for Deadline in range(110, 201, 20):
 
         all_plot_data = {}
 
-
+        # Run the experiment for each number of jobs.
         for job_number in job_numbers:
 
             served_mean_vals = []
-
+            
+            # Generate one integer weight between 1 and 9 for each job.
             job_weights_all = rng.integers(low=1,high=10,size=job_number)
 
             for mandatory_prob in mandatory_probs:
@@ -52,6 +55,7 @@ def main():
 
                 for _ in range(iterations):
 
+                    # Generate the TTC value for every job.
                     TTC_all = np.where(
                         rng.random(job_number) < mandatory_prob,
 
@@ -66,14 +70,13 @@ def main():
                         )
                     )
 
-                    program_results  = program(
+                    # Run the scheduling algorithm.
+                    accuracy_set  = program(
                         job_number,
                         TTC_all,
                         job_weights_all,
                         Deadline
                     )
-
-                    accuracy_set = program_results[4]
 
                     served_jobs = np.sum(accuracy_set)
 
