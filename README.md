@@ -2,7 +2,7 @@
 
 *Artifact and code for "Adaptive Scheduling of Intent Prediction Tasks in Autonomous Vehicles under Real-Time Constraints"*
 
-https://github.com/user-attachments/assets/daa29f5b-80fe-45cf-b405-692d09cde741
+Demonstration Video: https://github.com/user-attachments/assets/daa29f5b-80fe-45cf-b405-692d09cde741
 
 
 ## Table of Contents
