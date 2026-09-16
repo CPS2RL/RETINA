@@ -1,6 +1,6 @@
 # **RETINA**
 
-*Artifact and code for "Time-Aware Intent Prediction for Autonomous Vehicles using Adaptive Scheduling"*
+*Artifact and code for "Adaptive Scheduling of Intent Prediction Tasks in Autonomous Vehicles under Real-Time Constraints"*
 
 ## Table of Contents
 
