@@ -1,525 +1,334 @@
 # main.py
-
 import time
-from pathlib import Path
-
-from pipeline_logger import SchedulerCSVLogger
-from ultralytics import YOLO
 import cv2
 
-from config import (
-    IMAGE_DIR,
-    YOLO_MODEL_PATH,
-    YOLO_INTERVAL,
-    MODEL_REGISTRY,
-    DEADLINE_MS,
-    SERIAL_PORT,
-    BAUDRATE,
-    DANGER_BEHAVIORS,
-    SCHEDULER_MODE,
-    CSV_LOG_PATH,
-    CROP_DIR,
-)
+from ultralytics import YOLO
 
 from capture_camera import start_camera_capture
-
-from yolo_stage import (
-    get_latest_image,
-    wait_until_file_ready,
-    detect_objects,
-)
-
+from config import (BAUDRATE,DEADLINE_MS,IMAGE_DIR,MODEL_REGISTRY,SCHEDULER_MODE,SERIAL_PORT,
+                    YOLO_INTERVAL,YOLO_MODEL_PATH,CAMOT_TTC_CRITICAL_SEC)
+from robot_stage import MotorController,choose_retina_command,choose_ttc_command
 from ttc_stage import add_ttc_to_objects
+from tracking_stage import HardwareTracker
+from yolo_stage import detect_objects,get_latest_image,wait_until_file_ready
 
-from scheduler_stage import (
-    ModelSpec,
-    SchedulerMemory,
-    run_scheduler,
-)
-
-from behavior_stage import (
-    load_behavior_model,
-    run_behavior_model,
-)
-
-from robot_stage import (
-    MotorController,
-    choose_next_command,
-)
+RETINA_MODES={"RETINA_LOW","RETINA_HIGH","RETINA"}
 
 
 def build_model_specs():
-
-    specs = []
-
-    for item in MODEL_REGISTRY:
-
-        specs.append(
-            ModelSpec(
-                name=item["name"],
-                model_path=str(item["path"]),
-                accuracy=item["accuracy"],
-                exec_time_ms=item["exec_time_ms"],
-            )
+    from scheduler_stage import ModelSpec
+    return [
+        ModelSpec(
+            name=m["name"],display=m["display"],model_path=str(m["path"]),
+            accuracy=m["accuracy"],exec_time_ms=m["exec_time_ms"],int8=m["int8"]
         )
-
-    return specs
-
-def save_job_crop(
-    image_path,
-    obj,
-):
-
-    CROP_DIR.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    frame = cv2.imread(
-        str(image_path)
-    )
-
-    if frame is None:
-        print(f"Could not read image: {image_path}")
-        return None
-
-    h, w = frame.shape[:2]
-
-    x1, y1, x2, y2 = map(
-        int,
-        obj["box"],
-    )
-
-    x1 = max(0, min(x1, w - 1))
-    y1 = max(0, min(y1, h - 1))
-    x2 = max(0, min(x2, w - 1))
-    y2 = max(0, min(y2, h - 1))
-
-    if x2 <= x1 or y2 <= y1:
-        print(f"Invalid box for {obj['job_uid']}: {obj['box']}")
-        return None
-
-    cv2.rectangle(
-        frame,
-        (x1, y1),
-        (x2, y2),
-        (0, 255, 0),
-        2,
-    )
-
-    label_lines = [
-        f"{obj['job_uid']}",
-        f"{obj.get('label', '')}",
-        f"TTC={obj.get('ttc', '')}",
+        for m in MODEL_REGISTRY
     ]
+# RETINA
+def run_retina_cycle(cycle_id,image_path,yolo_model,tracker,memory,buffer,models,specs,motor,brake_hold,dt):
+    from scheduler_stage import run_scheduler
+    frame=cv2.imread(str(image_path))
+    if frame is None: 
+        return brake_hold,0,0
+    yolo=detect_objects(yolo_model,image_path)
+    objects=tracker.update(add_ttc_to_objects(yolo))
+    visible_ids={int(o["track_id"]) for o in objects}
+    for obj in objects: 
+        buffer.update_from_history(image_path,obj["track_id"],obj["box"])
+    buffer.remove_missing_tracks(tracker.active_track_ids())
+    now=time.monotonic()
+    memory.update_ttc(dt,visible_ids)
+    memory.prune(tracker.active_track_ids())
+    jobs=memory.add_current_cycle_jobs(cycle_id,objects,now)
+    sched_start=time.monotonic()
+    schedule,info=run_scheduler(specs,jobs,DEADLINE_MS,SCHEDULER_MODE)
+    execution_start=sched_start
+    admitted=processed=delayed=buffering=0
+    behavior_ms=0.0
+    selected_models=[]; used_models=[]; served=[]; results=[]; rows=[]
+    missed_ttc=set(); missed_deadline=set()
 
-    line_height = 16
-    start_y = y1 + 16
+    for job_id,model_id in schedule:
+        obj=jobs[job_id]; uid=obj["job_uid"]
+        urgent=bool(info["urgent"][job_id]); eta=int(info["eta"][job_id])
+        due=float(obj.get("ttc_due_time",float("inf")))
+        if model_id is None:
+            delayed+=1; memory.mark_skipped(uid)
+            if urgent: missed_deadline.add(uid)
+            rows.append((obj,"DELAYED","",None,urgent,eta,"",False if urgent else ""))
+            continue
+        admitted+=1
+        spec=specs[model_id]
+        selected_models.append(spec.display)
+        served.append(uid)
+        if not buffer.ready(obj["track_id"]):
+            buffering+=1
+            completion=(time.monotonic()-execution_start)*1000.0
+            if urgent: 
+                missed_deadline.add(uid)
+            rows.append((obj,"BUFFERING",spec,None,urgent,eta,completion,False if urgent else ""))
+            continue
+        result=buffer.infer(models[spec.name],obj["track_id"])
+        if result is None:
+            buffering+=1
+            if urgent: missed_deadline.add(uid)
+            rows.append((obj,"BUFFERING",spec,None,urgent,eta,"",False if urgent else ""))
+            continue
+        processed+=1
+        used_models.append(spec.display)
+        results.append(result)
+        behavior_ms+=float(result["runtime_ms"])
+        completion_time=time.monotonic()
+        completion_ms=(completion_time-execution_start)*1000.0
+        deadline_met=completion_ms<=DEADLINE_MS
+        if not deadline_met: missed_deadline.add(uid)
+        if completion_time>=due: 
+            missed_ttc.add(uid)
+            memory.mark_ttc_missed(uid)
+        rows.append((obj,"PROCESSED",spec,result,urgent,eta,completion_ms,deadline_met))
+    missed_ttc.update(memory.collect_ttc_misses(time.monotonic()))
+    memory.remove_served(served)
+    left,right,brake_hold,state=choose_retina_command(objects,results,brake_hold)
+    motor.set_command(left,right)
+    for obj,_,spec,result,urgent,eta,completion,deadline_met in rows:
+        uid=obj["job_uid"]
 
-    for i, text in enumerate(label_lines):
 
-        y_text = start_y + i * line_height
 
-        cv2.putText(
-            frame,
-            text,
-            (x1 + 3, y_text),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (0, 255, 0),
-            1,
-            cv2.LINE_AA,
-        )
+# RTDeepIoT
+def run_rtdeepiot_cycle(cycle_id,image_path,yolo_model,tracker,motor,model,device,wcet,brake_hold):
+    from rtdeepiot_stage import (read_frame,run_rtdeepiot_schedule,classify_crop,job_deadline_ms)
+    cycle_start=time.monotonic()
+    frame=read_frame(image_path)
+    if frame is None:
+        return brake_hold,0
+    # YOLO -> TTC -> persistent hardware tracks
+    yolo=detect_objects(yolo_model,image_path)
+    objects=tracker.update(add_ttc_to_objects(yolo))
+    # RTDeepIoT scheduling
+    rt_start=time.monotonic()
+    schedule=run_rtdeepiot_schedule(model,device,wcet,frame,objects)
+    final=schedule["final_assignment"]
+    stage1=schedule["stage1_results"]
+    admitted_ids=set(schedule["admitted_ids"])
+    delayed_ids=set(schedule["delayed_ids"])
+    # Execute final selected depths
+    processed_results=[]
+    final_extra_runtime_ms=0.0
+    jobs_processed=0
+    jobs_buffering=0
+    missed_ttc=set()
+    missed_deadline=set()
+    selected_depths=[]
+    used_depths=[]
+    object_map={int(o["track_id"]):o for o in objects}
 
-    bbox_name = f"{obj['job_uid']}.jpg"
+    for tid in admitted_ids:
+        obj=object_map.get(tid)
 
-    bbox_path = CROP_DIR / bbox_name
+        if obj is None:
+            continue
+        depth=int(final.get(tid,1))
+        selected_depths.append(f"Depth-{depth}")
 
-    cv2.imwrite(
-        str(bbox_path),
-        frame,
-    )
+        # Depth 1 was already executed during scheduler phase
+        if depth==1:
+            result=stage1.get(tid)
+            if result is None:
+                jobs_buffering+=1
+                continue
+            completion_ms=float(result.get("completion_ms",(time.monotonic()-rt_start)*1000.0))
+        # Depth 2 / 3 executes another cumulative inference
+        else:
+            result=classify_crop(model,device,frame,obj["box"],depth)
 
-    obj["bbox_image_path"] = str(
-        bbox_path
-    )
+            if result is None:
+                jobs_buffering+=1
+                continue
 
-    return bbox_path
+            final_extra_runtime_ms+=float(result["runtime_ms"])
+
+            completion_ms=(time.monotonic()-rt_start)*1000.0
+
+        jobs_processed+=1
+
+        used_depths.append(f"Depth-{depth}")
+        deadline_ms=job_deadline_ms(obj,wcet)
+        ttc_ms=float(obj["ttc"])*1000.0
+        deadline_met=(completion_ms<=deadline_ms)
+        ttc_miss=(completion_ms>ttc_ms)
+        if not deadline_met:
+            missed_deadline.add(tid)
+
+        if ttc_miss:
+            missed_ttc.add(tid)
+        processed_results.append({"obj":obj,"depth":depth,"result":result,"completion_ms":completion_ms,"deadline_ms":deadline_ms,
+                                  "deadline_met":deadline_met,"missed_ttc":ttc_miss})
+
+    # Robot control
+    left,right,brake_hold,state=choose_ttc_command(objects,brake_hold)
+
+    motor.set_command(left,right)
+    command=("STOP" if brake_hold else "GO")
+
+    # Per-job log: PROCESSED
+    processed_ids=set()
+
+    for item in processed_results:
+        obj=item["obj"]
+        tid=int(obj["track_id"])
+        processed_ids.add(tid)
+
+        depth=item["depth"]
+        result=item["result"]
+
+
+    # Per-job log: DELAYED
+    for obj in objects:
+        tid=int(obj["track_id"])
+        if tid not in delayed_ids:
+            continue
+
+    # Admitted job whose inference failed
+    failed_ids=(admitted_ids-processed_ids)
+    jobs_buffering+=len(failed_ids)
+    # Runtime totals
+    return brake_hold,jobs_processed
     
+# CA-MOT
+def run_camot_cycle(
+    cycle_id,image_path,yolo_model,runtime,motor,brake_hold,dt):
+    frame=cv2.imread(str(image_path))
+    if frame is None:
+        return brake_hold,0
+    result=runtime.step(frame,yolo_model,dt)
+    objects=result["objects"]
+    # Robot control 
+    left,right,brake_hold,state=choose_ttc_command(objects,brake_hold)
+    motor.set_command(left,right)
+    scheduler_choices=[]
+    missed_ttc=0
+    missed_deadline=0
+    processed=0
+    delayed=0
+    # Per-track logging
+    for obj in objects:
+        status=obj.get("job_status","PROCESSED")
+        ttc_missed=(float(obj["ttc"])<=0.0)
+        is_urgent=(float(obj["ttc"])<CAMOT_TTC_CRITICAL_SEC)
+        if ttc_missed:
+            missed_ttc+=1
+        # DELAYED JOB
+        # No D/A computation was executed
+        if status=="DELAYED":
+            delayed+=1
+            continue
+        # PROCESSED JOB
+        s=obj["detection_level"]
+        f=obj["association_level"]
+        processed+=1
+        choice=f"D={s};A={f}"
+        scheduler_choices.append(choice)
+        deadline_met=bool(obj["deadline_met"])
+        if not deadline_met:
+            missed_deadline+=1
+
+    return (brake_hold,result["jobs_processed"])
+
+
+# Main
 def main():
+    print(f"\nStarting: {SCHEDULER_MODE}")
 
-    print("\nStarting Camera Capture...")
-
-    camera_thread, camera_stop_event = start_camera_capture()
-
+    camera_thread,camera_stop=start_camera_capture()
     time.sleep(1.0)
 
-    print("\nLoading YOLO...")
+    yolo_model=YOLO(str(YOLO_MODEL_PATH))
 
-    yolo_model = YOLO(YOLO_MODEL_PATH)
+    motor=None
 
-    csv_logger = SchedulerCSVLogger(CSV_LOG_PATH)
-
-    model_specs = build_model_specs()
-
-    scheduler_memory = SchedulerMemory()
-
-    behavior_models = {}
-
-    for spec in model_specs:
-
-
-        behavior_models[spec.name] = load_behavior_model(
-            spec.model_path
-        )
-
-
-    motor = MotorController(
-        port=SERIAL_PORT,
-        baudrate=BAUDRATE,
-    )
-
-    motor.start()
-
-    cycle_id = 0
-    last_image = None
-
-    total_missed_deadlines = 0
-    total_served_jobs = 0
+    tracker=None; memory=None; buffer=None
+    models={}; specs=[]
+    camot=None
+    rt_model=rt_device=rt_wcet=None
 
     try:
+        # RETINA initialization
+        if SCHEDULER_MODE in RETINA_MODES:
+            from behavior_stage import BehaviorBuffer,load_behavior_model
+            from scheduler_stage import SchedulerMemory
 
-        print("\nRunning Warm-Up Cycle...")
+            tracker=HardwareTracker()
+            memory=SchedulerMemory()
+            buffer=BehaviorBuffer()
 
-        while True:
+            specs=build_model_specs()
 
-            time.sleep(YOLO_INTERVAL)
+            for spec in specs:
+                models[spec.name]=load_behavior_model(spec.model_path,spec.int8)
 
-            image_path = get_latest_image(IMAGE_DIR)
+        # CA-MOT initialization
+        elif SCHEDULER_MODE=="CAMOT":
+            from camot_stage import CAMOTRuntime
+            camot=CAMOTRuntime()
 
-            if image_path is None:
-                print("\nWarm-Up: No images found.")
-                continue
+        # RTDeepIoT initialization
+        elif SCHEDULER_MODE=="RTDeepIoT":
+            from rtdeepiot_stage import load_rtdeepiot_runtime,reset_confidence_ema
 
-            if not wait_until_file_ready(image_path):
-                print(
-                    f"\nWarm-Up: Image not ready: "
-                    f"{image_path.name}"
-                )
-                continue
+            tracker=HardwareTracker()
+            reset_confidence_ema()
 
+            rt_model,rt_device,rt_wcet=load_rtdeepiot_runtime()
 
+        # Robot.
+        motor=MotorController(SERIAL_PORT,BAUDRATE)
+        motor.start()
 
-            yolo_result = detect_objects(
-                yolo_model,
-                image_path,
-            )
-
-
-            objects = add_ttc_to_objects(yolo_result)
-
-            for idx, obj in enumerate(objects):
-
-                obj["job_uid"] = f"warmup_{idx}"
-
-                obj["label"] = obj.get(
-                    "label",
-                    "unknown",
-                )
-
-                obj["ttc"] = obj.get(
-                    "ttc",
-                    9999.0,
-                )
-
-            if len(objects) > 0:
-
-                obj = objects[0]
-                spec = model_specs[0]
-
-
-
-                behavior_result = run_behavior_model(
-                    behavior_models[spec.name],
-                    str(image_path),
-                    obj,
-                )
-
-
-
-            print("\nWarm-Up Complete.")
-
-            last_image = image_path
-
-            break
+        cycle=0
+        last_image=None
+        brake_hold=False
+        previous_cycle_time=time.monotonic()
 
         while True:
-
             time.sleep(YOLO_INTERVAL)
 
-            image_path = get_latest_image(IMAGE_DIR)
+            image_path=get_latest_image(IMAGE_DIR)
 
-            if image_path is None:
-                print("\nNo images found.")
+            if image_path is None or image_path==last_image: 
+                continue
+            if not wait_until_file_ready(image_path): 
                 continue
 
-            if image_path == last_image:
-                print("\nNo new image available.")
-                continue
+            # Actual elapsed time used by missed CA-MOT tracks.
+            now=time.monotonic()
+            dt=now-previous_cycle_time
+            previous_cycle_time=now
 
-            if not wait_until_file_ready(image_path):
-                print(
-                    f"\nImage not ready: "
-                    f"{image_path.name}"
-                )
-                continue
 
-            print("\n================================")
-            print(f"Cycle {cycle_id}")
+            if SCHEDULER_MODE in RETINA_MODES:
+                brake_hold,_,_=run_retina_cycle(cycle,image_path,yolo_model,tracker,memory,buffer,models,specs,motor,brake_hold,dt)
 
-            yolo_result = detect_objects(
-                yolo_model,
-                image_path,
-            )
+            elif SCHEDULER_MODE=="CAMOT":
+                brake_hold,_=run_camot_cycle(cycle,image_path,yolo_model,camot,motor,brake_hold,dt)
 
-            print(
-                f"\nYOLO Runtime : "
-                f"{yolo_result['inference_time_sec']} sec"
-            )
+            else:
+                brake_hold,_=run_rtdeepiot_cycle(cycle,image_path,yolo_model,tracker,motor,rt_model,rt_device,rt_wcet,brake_hold)
 
-            print(
-                f"Objects Found : "
-                f"{yolo_result['object_count']}"
-            )
-
-            objects = add_ttc_to_objects(yolo_result)
-
-            new_jobs_arrived = len(objects)
-
-            old_jobs_buffered = scheduler_memory.count_pending_jobs()
-
-            scheduler_memory.update_ttc(YOLO_INTERVAL)
-
-            missed_jobs = (
-                scheduler_memory
-                .remove_missed_deadline_jobs(
-                    threshold_sec=1.0
-                )
-            )
-
-            missed_deadlines_this_cycle = len(missed_jobs)
-
-            total_missed_deadlines += missed_deadlines_this_cycle
-
-            if missed_jobs:
-
-                print("\nMissed Deadline Jobs:")
-
-                for uid in missed_jobs:
-                    print(uid)
-
-            pending_objects = (
-                scheduler_memory
-                .add_current_cycle_jobs(
-                    cycle_id,
-                    objects,
-                )
-            )
-            
-            for obj in objects:
-
-              crop_path = save_job_crop(
-              image_path,
-              obj,
-              )
-
-              if crop_path is not None:
-                print(
-                  f"Saved crop for {obj['job_uid']}: {crop_path.name}"
-                  )
-
-            # remaining_deadline_ms = (
-            #     DEADLINE_MS
-            #     - (
-            #         yolo_result[
-            #             "inference_time_sec"
-            #         ]
-            #         * 1000.0
-            #     )
-            # )
-
-            remaining_deadline_ms = (
-                DEADLINE_MS - 600
-            )
-
-            print(
-                f"\nRemaining Budget : "
-                f"{remaining_deadline_ms:.2f} ms"
-            )
-
-            schedule = run_scheduler(
-                model_specs,
-                pending_objects,
-                remaining_deadline_ms,
-                scheduler_mode=SCHEDULER_MODE,
-            )
-
-            print("\nScheduler Decisions:")
-
-            behavior_results = []
-            served_job_uids = []
-
-            for job_id, model_id in schedule:
-
-                obj = pending_objects[job_id]
-
-                if model_id is None:
-
-                    print(
-                        f"\nSKIP : "
-                        f"{obj['job_uid']}"
-                    )
-
-                    continue
-
-                spec = model_specs[model_id]
-
-                print(
-                    f"\nRUN : "
-                    f"{obj['job_uid']}"
-                )
-
-                print(
-                    f"Class : "
-                    f"{obj['label']}"
-                )
-
-                print(
-                    f"TTC   : "
-                    f"{obj['ttc']} sec"
-                )
-
-                print(
-                    f"Model : "
-                    f"{spec.name}"
-                )
-
-                print(
-                    f"Exec  : "
-                    f"{spec.exec_time_ms} ms"
-                )
-
-                behavior_result = run_behavior_model(
-                    behavior_models[spec.name],
-                    str(image_path),
-                    obj,
-                )
-
-                if behavior_result is None:
-
-                    print("Behavior failed.")
-
-                    continue
-
-                served_job_uids.append(
-                    obj["job_uid"]
-                )
-
-                behavior_results.append(
-                    behavior_result
-                )
-
-                print(
-                    f"Behavior : "
-                    f"{behavior_result['behavior']}"
-                )
-
-                print(
-                    f"Runtime  : "
-                    f"{behavior_result['runtime_ms']} ms"
-                )
-
-                robot_command = "GO"
-
-                if (
-                    behavior_result["behavior"]
-                    in DANGER_BEHAVIORS
-                ):
-                    robot_command = "STOP"
-
-                print(
-                    f"Robot Command = {robot_command}"
-                )
-
-                csv_logger.log_job(
-                    cycle=cycle_id,
-                    image_name=Path(image_path).name,
-                    yolo_runtime_sec=yolo_result[
-                        "inference_time_sec"
-                    ],
-                    object_count=yolo_result[
-                        "object_count"
-                    ],
-                    job_uid=obj["job_uid"],
-                    cls=obj["label"],
-                    ttc_sec=obj["ttc"],
-                    selected_model=spec.name,
-                    model_exec_ms=spec.exec_time_ms,
-                    behavior=behavior_result[
-                        "behavior"
-                    ],
-                    behavior_runtime_ms=behavior_result[
-                        "runtime_ms"
-                    ],
-                    robot_command=robot_command,
-                )
-
-            scheduler_memory.remove_served_jobs(
-                served_job_uids
-            )
-
-            served_this_cycle = len(served_job_uids)
-
-            total_served_jobs += served_this_cycle
-
-            buffered_for_next = scheduler_memory.count_pending_jobs()
-
-            left_cmd, right_cmd = choose_next_command(
-                behavior_results,
-                DANGER_BEHAVIORS,
-            )
-
-            motor.set_command(
-                left_cmd,
-                right_cmd,
-            )
-
-            print("\n================================")
-            print("Cycle Summary")
-            print("================================")
-            print(f"New jobs arrived      : {new_jobs_arrived}")
-            print(f"Old jobs buffered     : {old_jobs_buffered}")
-            print(f"Jobs served           : {served_this_cycle}")
-            print(f"Buffered for next     : {buffered_for_next}")
-            print(f"Missed deadlines      : {missed_deadlines_this_cycle}")
-            print(f"Total served jobs     : {total_served_jobs}")
-            print(f"Total missed deadlines: {total_missed_deadlines}")
-
-            last_image = image_path
-
-            cycle_id += 1
+            last_image=image_path
+            cycle+=1
 
     except KeyboardInterrupt:
+        print("\nStopping experiment...")
 
-        print("\nStopping system...")
+    finally:
+        camera_stop.set()
+        camera_thread.join(timeout=2)
 
-        camera_stop_event.set()
-
-        motor.shutdown()
-
-        csv_logger.close()
+        if motor:
+            try: motor.shutdown()
+            except Exception as e: print(f"Motor shutdown warning: {e}")
 
 
-if __name__ == "__main__":
 
-    main()
+if __name__=="__main__": main()
