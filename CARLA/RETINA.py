@@ -31,7 +31,7 @@ BRAKE_DIST           = 20.0
 CONF_THRESHOLD       = 0.60
 
 
-# Requested scene composition; actual counts depend on spawn success and behavior lists.
+# Requested actor counts; actual counts depend on spawn success and the behavior mix.
 TOTAL_PEDS           = 20
 TOTAL_CARS           = 15
 TOTAL_MOTORCYCLES    = 5
@@ -55,7 +55,7 @@ DEADLINE_MS          = 500.0
 A_REQ                = 0.25
 
 
-# Fixed budget reservation, not a solver time limit.
+# Solver-overhead reservation in milliseconds; does not impose a solver time limit.
 SCHEDULER_OVERHEAD_MS = 6.0
 UNSTICK_INTERVAL     = 3.0
 
@@ -88,12 +88,13 @@ VEHICLE_BP_FILTERS = {
 
 def run_scheduler(job_number, ttc_list, deadline_ms=DEADLINE_MS):
     """Select at most one model per job using TTC-weighted accuracy.
-    
+
     TTC values are in seconds; the deadline and lookup costs are in
     milliseconds. Jobs with floor(TTC / deadline_seconds) <= 1 are mandatory
     for finite positive TTC. Return (job/model assignments, urgency weights),
     using None for deferred jobs. The budget covers lookup inference costs
-    minus a fixed solver reservation, not measured end-to-end execution."""
+    minus a fixed solver reservation, not measured end-to-end execution.
+    """
     if job_number == 0:
         return [], []
 
@@ -160,8 +161,8 @@ def run_scheduler(job_number, ttc_list, deadline_ms=DEADLINE_MS):
 
         model_g.optimize()
 
-        # Non-optimal solver fallback: admit jobs in TTC order with the fastest
-        # model from the full registry. This path does not enforce A_REQ or mandatory service.
+        # Non-optimal fallback: admit jobs in TTC order with the fastest registry model.
+        # This path does not enforce A_REQ or guarantee service for urgent jobs.
         if model_g.Status != GRB.OPTIMAL:
             fastest_id = int(np.argmin(MODEL_EXEC_TIMES))
             order      = sorted(range(job_number), key=lambda j: ttc_list[j])
@@ -257,8 +258,9 @@ agent_frame_buffers = {}
 agent_predictions   = {}
 
 
-# Learned softmax pooling over the GRU time dimension.
 class TemporalAttention(nn.Module):
+    """Pool GRU outputs over time using learned softmax attention weights."""
+
     def __init__(self, hidden_size, dropout=0.5):
         super().__init__()
         self.attn = nn.Sequential(
@@ -274,8 +276,9 @@ class TemporalAttention(nn.Module):
         return (weights * gru_out).sum(dim=1)
 
 
-# Per-frame ShuffleNet features followed by a GRU, attention, and two heads.
 class ShuffleNetGRU(nn.Module):
+    """Classify crop sequences using ShuffleNet, a GRU, and temporal attention."""
+
     def __init__(self,
                  num_agent_classes    = 8,
                  num_behavior_classes = 7,
@@ -409,10 +412,11 @@ for _m in range(MODEL_NUMBER):
 
 def load_shufflenet_gru(pth_path, device, width_mult=1.0, int8=False):
     """Load checkpoint weights and labels, optionally applying CPU dynamic INT8.
-    
+
     Checkpoint label metadata updates the global class lists. Linear and GRU
     layers are quantized; the convolutional backbone remains floating point.
-    Weight-loading errors are reported but do not abort model construction."""
+    Weight-loading errors are reported but do not abort model construction.
+    """
     global AGENT_CLASSES, BEHAVIOR_CLASSES
 
     ckpt = torch.load(pth_path, map_location=device)
@@ -533,8 +537,9 @@ inference_transform = transforms.Compose([
 
 def preprocess_crop(frame_bgr, box, pad=10):
     """Pad and clip an xyxy box, then return a normalized RGB crop tensor.
-    
-    Use the full frame if the clipped crop is empty."""
+
+    Use the full frame if the clipped crop is empty.
+    """
     h, w   = frame_bgr.shape[:2]
     x1, y1, x2, y2 = map(int, box)
 
@@ -587,9 +592,10 @@ def detect_agents_yolo(frame):
 
 def run_inference(model, frame_buffer):
     """Classify a buffered crop sequence on the selected model's device.
-    
+
     Return agent label, behavior label, and their softmax confidences.
-    The input sequence has shape (T, C, H, W) before adding a batch axis."""
+    The input sequence has shape (T, C, H, W) before adding a batch axis.
+    """
     frames  = list(frame_buffer)
     stacked = torch.stack(frames, dim=0)
     model_device = next(model.parameters()).device
@@ -643,9 +649,10 @@ def camera_callback(image):
 def world_to_camera_pixel(world_loc, vehicle,
                            cam_w=800, cam_h=600, fov=90):
     """Project a world location using the ego yaw and fixed camera offsets.
-    
+
     This approximation ignores pitch and roll. Return None for points behind
-    the camera or outside the image; defaults match the episode RGB sensor."""
+    the camera or outside the image; defaults match the episode RGB sensor.
+    """
     vt      = vehicle.get_transform()
     yaw_rad = math.radians(vt.rotation.yaw)
     cam_x   = vt.location.x + math.cos(yaw_rad) * 2.5
@@ -674,9 +681,10 @@ def world_to_camera_pixel(world_loc, vehicle,
 def is_agent_in_detection(agent, vehicle, detections,
                            pixel_threshold=80):
     """Match an actor's projected origin to the first expanded detection box.
-    
+
     Association uses CARLA actor positions, without class matching or a
-    one-to-one assignment constraint."""
+    one-to-one assignment constraint.
+    """
     if not detections:
         return False, None
     proj = world_to_camera_pixel(agent.get_location(), vehicle)
@@ -718,7 +726,7 @@ def get_sidewalk_nav_location(world, attempts=50):
 
 
 def destroy_ped(entry):
-    """Stop and destroy a pedestrian and controller, then remove cached state."""
+    """Attempt to destroy a pedestrian/controller pair and remove cached state."""
     try:
         entry['ctrl'].stop()
         entry['ctrl'].destroy()
@@ -829,17 +837,21 @@ def spawn_single_ped(world, bp_lib, vehicle,
 
 def spawn_all_pedestrians(world, bp_lib, vehicle):
     """Spawn pedestrians using the fixed standing, walking, and crossing mix.
-    
+
     The zip below limits attempts to the shorter of the distance and behavior
-    lists; the current behavior list contains ten entries."""
+    lists; the current behavior list contains ten entries.
+    """
     pedestrians   = []
     fwd_distances = sorted([
         random.uniform(PED_SPREAD_MIN, PED_SPREAD_MAX)
         for _ in range(TOTAL_PEDS)
     ])
+    n_crossing = TOTAL_PEDS // 5
+    n_standing = (TOTAL_PEDS * 2) // 5
+    n_walking  = TOTAL_PEDS - n_crossing - n_standing
     behaviours = (
-        ['standing'] * 4 + ['walking'] * 4 +
-        ['crossing'] * 2
+        ['standing'] * n_standing + ['walking'] * n_walking +
+        ['crossing'] * n_crossing
     )
     random.shuffle(behaviours)
     print(f"\n[SPAWN]    Spawning {TOTAL_PEDS} pedestrians")
@@ -984,7 +996,6 @@ def spawn_all_vehicles(world, bp_lib, vehicle, tm):
 
     print(f"[SPAWN]    {len(spawned_vehicles)} road vehicles spawned")
     print(f"[SPAWN]    Waiting for TM to initialise all vehicles...")
-    # Allow Traffic Manager initialization before entering the episode loop.
     time.sleep(2.0)
     print(f"[SPAWN]    All vehicles should be moving\n")
     return spawned_vehicles
@@ -1123,9 +1134,10 @@ def draw_prediction_on_frame(display, det,
                               beh_conf, model_name,
                               is_danger=False):
     """Draw a detection box and model/behavior labels in place.
-    
+
     Use a thicker box for dangerous predictions and omit labels for
-    buffering or skipped jobs. All actor types use the same box color."""
+    buffering or skipped jobs. All actor types use the same box color.
+    """
     if display is None or det is None:
         return display
     x1, y1, x2, y2 = det['box']
@@ -1168,10 +1180,11 @@ def draw_prediction_on_frame(display, det,
 
 def run_episode(duration_sec: float = RUN_DURATION_S) -> bool:
     """Run an episode until timeout, collision, user quit, or interruption.
-    
-    Connect to CARLA on localhost:2000 and release spawned actors in the
+
+    Connect to CARLA on localhost:2000 and attempt actor cleanup in the
     finally block. Return whether a collision was observed; False also
-    includes early user exits and does not imply a completed episode."""
+    includes early user exits and does not imply a completed episode.
+    """
 
     client = carla.Client('localhost', 2000)
     client.set_timeout(10.0)
@@ -1644,7 +1657,6 @@ def run_episode(duration_sec: float = RUN_DURATION_S) -> bool:
                     buf_size   = len(agent_frame_buffers.get(aid, []))
 
 
-                    # Run inference only when an assigned job has a full observation window.
                     if model_id is not None and buf_size >= N_FRAMES:
                         model_name    = MODEL_REGISTRY[model_id]['name']
                         display_model = MODEL_REGISTRY[model_id]['display']
@@ -1688,7 +1700,6 @@ def run_episode(duration_sec: float = RUN_DURATION_S) -> bool:
                         model_name    = "SKIPPED"
                         display_model = "skipped"
                         va['deferred_count'] = va.get('deferred_count', 0) + 1
-                        # Retain skipped jobs for re-admission in the next cycle.
                         deferred_jobs[aid] = va
                         n_skipped_cnt += 1
                         models_used.append('SKIP')
