@@ -47,7 +47,7 @@ VEH_SPREAD_MIN       = 20.0
 VEH_SPREAD_MAX       = 150.0
 
 LOG_DIR              = "logs"
-MODEL_DIR            = "model"
+MODEL_DIR            = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model")
 DEADLINE_MS          = 500.0
 
 
