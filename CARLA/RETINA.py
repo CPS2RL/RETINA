@@ -1,4 +1,3 @@
-
 import carla
 import math
 import time
@@ -22,16 +21,17 @@ from PIL import Image
 sys.path.insert(0, './yolov5')
 
 
-# CONFIGURATION CONSTANTS
-# Networking / detection thresholds
-TM_PORT              = 8000    # CARLA Traffic Manager port (controls autopilot)
-YOLO_CONF            = 0.4     # YOLO minimum detection confidence to keep a box
-N_FRAMES             = 16      # observation window length (frames)
+# Experiment configuration. Distances are meters and speeds are m/s.
+TM_PORT              = 8000
+YOLO_CONF            = 0.4
+# Number of buffered crops required before running prediction.
+N_FRAMES             = 16
 FRAME_SIZE           = (224, 224)
-BRAKE_DIST           = 20.0    # metres -- brake if a dangerous object is closer
-CONF_THRESHOLD       = 0.60    # minimum behaviour-prediction confidence to trust
+BRAKE_DIST           = 20.0
+CONF_THRESHOLD       = 0.60
 
-# Scene composition -- how many of each actor type CARLA spawns for this run
+
+# Requested scene composition; actual counts depend on spawn success and behavior lists.
 TOTAL_PEDS           = 20
 TOTAL_CARS           = 15
 TOTAL_MOTORCYCLES    = 5
@@ -39,26 +39,28 @@ TOTAL_BICYCLES       = 5
 TOTAL_BUSES          = 3
 TOTAL_TRUCKS         = 5
 
-# How far (metres, forward of the ego) actors are scattered when spawned
+
+# Pedestrian forward spawn offsets. VEH_SPREAD_* are currently unused.
 PED_SPREAD_MIN       = 10.0
 PED_SPREAD_MAX       = 120.0
 VEH_SPREAD_MIN       = 20.0
 VEH_SPREAD_MAX       = 150.0
 
-RECORD_FPS           = 10          # output video frame rate
-RECORD_DIR           = "recordings"
 LOG_DIR              = "logs"
-MODEL_DIR            = "model"     # directory containing the .pth checkpoints
-DEADLINE_MS          = 500.0       # D -- per-cycle scheduling deadline
+MODEL_DIR            = "model"
+DEADLINE_MS          = 500.0
 
-# ── Nominal model-selection restriction ────────────────────────────────
-A_REQ                = 0.20   # minimum accuracy threshold (placeholder value)
 
-# ── Scheduler-overhead reservation ─────────────────────────────────────
-SCHEDULER_OVERHEAD_MS = 6.0    # Delta_s -- reserved solver-overhead budget
-UNSTICK_INTERVAL     = 3.0     # seconds between checks for vehicles stuck idle
+# Minimum lookup accuracy for ILP eligibility; 0.25 admits the full portfolio.
+A_REQ                = 0.25
 
-# Candidate CARLA blueprints for each spawned agent type (picked at random
+
+# Fixed budget reservation, not a solver time limit.
+SCHEDULER_OVERHEAD_MS = 6.0
+UNSTICK_INTERVAL     = 3.0
+
+
+# Preferred CARLA blueprint IDs by actor category.
 VEHICLE_BP_FILTERS = {
     "Car"    : ['vehicle.tesla.model3',
                 'vehicle.audi.a2',
@@ -85,27 +87,33 @@ VEHICLE_BP_FILTERS = {
 
 
 def run_scheduler(job_number, ttc_list, deadline_ms=DEADLINE_MS):
+    """Select at most one model per job using TTC-weighted accuracy.
+    
+    TTC values are in seconds; the deadline and lookup costs are in
+    milliseconds. Jobs with floor(TTC / deadline_seconds) <= 1 are mandatory
+    for finite positive TTC. Return (job/model assignments, urgency weights),
+    using None for deferred jobs. The budget covers lookup inference costs
+    minus a fixed solver reservation, not measured end-to-end execution."""
     if job_number == 0:
         return [], []
 
-    # ── Step 1: classify urgency from TTC ─────────────────────────────
+
+    # Nonpositive or nonfinite TTC receives low weight and optional status.
     D_sec = deadline_ms / 1000.0
     eta, weight = [], []
     for ttc in ttc_list:
         if math.isfinite(ttc) and ttc > 0:
             eta.append(int(math.floor(ttc / D_sec)))
-            weight.append(1.0 / ttc)          # urgency weight: closer -> larger weight
+            weight.append(1.0 / ttc)
         else:
-            eta.append(999)                   # not closing / invalid TTC -> not urgent
-            weight.append(0.01)               # small non-zero weight, still admissible
-    urgent = [e <= 1 for e in eta]             # True = mandatory this cycle
+            eta.append(999)
+            weight.append(0.01)
+    urgent = [e <= 1 for e in eta]
 
-    # ── Step 1b: M_valid -- nominal model restriction ──────────────────
-    m_valid = [m for m in range(MODEL_NUMBER) if MODEL_ACCURACIES[m] >= A_REQ]
-    if not m_valid:
-        m_valid = list(range(MODEL_NUMBER))
 
-    # ── Effective deadline D' = D - Delta_s ───────────────────────────
+    m_valid = M_VALID
+
+
     deadline_eff_ms = max(deadline_ms - SCHEDULER_OVERHEAD_MS, 0.0)
 
     try:
@@ -113,6 +121,7 @@ def run_scheduler(job_number, ttc_list, deadline_ms=DEADLINE_MS):
         model_g.setParam("OutputFlag", 0)
         model_g.setParam("Seed", 0)
 
+        # Binary assignment variable for each job and eligible model.
         x = {}
         for job_id in range(job_number):
             for model_id in m_valid:
@@ -122,24 +131,27 @@ def run_scheduler(job_number, ttc_list, deadline_ms=DEADLINE_MS):
                 )
         model_g.update()
 
-        # ── Step 2: urgency-weighted objective ───────────────────────
+
+        # Maximize lookup accuracy weighted by inverse TTC.
         obj = gp.LinExpr()
         for job_id in range(job_number):
             for model_id in m_valid:
                 obj += weight[job_id] * MODEL_ACCURACIES[model_id] * x[job_id, model_id]
         model_g.setObjective(obj, GRB.MAXIMIZE)
 
-        # ── Step 3: mandatory (urgent) vs optional (non-urgent) jobs ─────
+
+        # Mandatory jobs receive one model; optional jobs may be deferred.
         for job_id in range(job_number):
             s = gp.LinExpr()
             for model_id in m_valid:
                 s += x[job_id, model_id]
             if urgent[job_id]:
-                model_g.addConstr(s == 1, name=f"Mandatory_{job_id}")   # must be served
+                model_g.addConstr(s == 1, name=f"Mandatory_{job_id}")
             else:
-                model_g.addConstr(s <= 1, name=f"Optional_{job_id}")    # best-effort
+                model_g.addConstr(s <= 1, name=f"Optional_{job_id}")
 
-        # ── Step 4: effective per-cycle timing budget ─────────────────
+
+        # Bound the sum of nominal inference costs for sequential execution.
         total_time = gp.LinExpr()
         for job_id in range(job_number):
             for model_id in m_valid:
@@ -148,6 +160,8 @@ def run_scheduler(job_number, ttc_list, deadline_ms=DEADLINE_MS):
 
         model_g.optimize()
 
+        # Non-optimal solver fallback: admit jobs in TTC order with the fastest
+        # model from the full registry. This path does not enforce A_REQ or mandatory service.
         if model_g.Status != GRB.OPTIMAL:
             fastest_id = int(np.argmin(MODEL_EXEC_TIMES))
             order      = sorted(range(job_number), key=lambda j: ttc_list[j])
@@ -173,10 +187,11 @@ def run_scheduler(job_number, ttc_list, deadline_ms=DEADLINE_MS):
 
     except Exception as e:
         print(f"[SOLVER]   Error: {e}")
+        # Exception fallback assigns model 0 to every job without a budget check.
         return [(i, 0) for i in range(job_number)], [1] * job_number
 
-# LABEL TAXONOMIES
-# Maps YOLOv5's COCO class indices onto our agent-type vocabulary
+
+# Map supported COCO class indices to the experiment actor vocabulary.
 YOLO_CLASS_MAP = {
     0: "Ped",
     1: "Cyc",
@@ -187,20 +202,32 @@ YOLO_CLASS_MAP = {
 }
 YOLO_CLASSES = list(YOLO_CLASS_MAP.keys())
 
-# Agent-type / behaviour vocabularies predicted by the ShuffleNetGRU model
+
+# Default output labels; checkpoint metadata may override these lists.
 AGENT_CLASSES = [
     'Ped', 'Car', 'Cyc', 'Mobike',
     'MedVeh', 'LarVeh', 'Bus', 'EmVeh'
 ]
+
+
 BEHAVIOR_CLASSES = [
+    'MovAway', 'MovTow', 'Mov', 'Brake', 'Stop',
+    'IncatLft', 'IncatRht', 'HazLit', 'TurLft', 'TurRht',
+    'Ovtak', 'Wait2X', 'XingFmLft', 'XingFmRht', 'Xing', 'PushObj'
+]
+
+
+# Fallback label order for seven-output checkpoints without behavior metadata.
+LEGACY_BEHAVIOR_CLASSES_7 = [
     'MovAway', 'MovTow', 'Mov', 'Stop',
     'IncatLft', 'Ovtak', 'PushObj'
 ]
 
-# Predicted behaviours that count as "dangerous" -- if a served object's
-DANGER_BEHAVIORS = {"MovTow", "Xing", "Stop"}
 
-# Bounding-box colour per agent type, for the on-screen HUD overlay.
+# Behavior labels eligible to trigger braking with distance/confidence checks.
+DANGER_BEHAVIORS = {"MovTow", "Xing", "XingFmLft", "XingFmRht", "Stop"}
+
+
 AGENT_COLORS = {
     "Ped"    : (0,   255, 127),
     "Car"    : (0,   128, 255),
@@ -212,25 +239,25 @@ AGENT_COLORS = {
     "EmVeh"  : (0,     0, 255),
 }
 
-# Standard ImageNet normalisation stats used to preprocess model inputs.
+
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"[DEVICE]   Using {DEVICE}")
 
-os.makedirs(RECORD_DIR, exist_ok=True)
-os.makedirs(LOG_DIR,    exist_ok=True)
+RUN_DURATION_S = 100
 
-# ── Module-level shared state, mutated by the camera callback / main loop ──
-latest_frame        = None   # most recent camera frame (set by camera_callback)
-agent_frame_buffers = {}     # actor_id -> deque of last N_FRAMES preprocessed crops
-agent_predictions   = {}     # actor_id -> (last agent_type, last behaviour) cache,
-
-video_writer = None
-record_path  = None
+os.makedirs(LOG_DIR, exist_ok=True)
 
 
+# Shared camera state and per-actor crop/prediction caches.
+latest_frame        = None
+agent_frame_buffers = {}
+agent_predictions   = {}
+
+
+# Learned softmax pooling over the GRU time dimension.
 class TemporalAttention(nn.Module):
     def __init__(self, hidden_size, dropout=0.5):
         super().__init__()
@@ -247,6 +274,7 @@ class TemporalAttention(nn.Module):
         return (weights * gru_out).sum(dim=1)
 
 
+# Per-frame ShuffleNet features followed by a GRU, attention, and two heads.
 class ShuffleNetGRU(nn.Module):
     def __init__(self,
                  num_agent_classes    = 8,
@@ -257,6 +285,8 @@ class ShuffleNetGRU(nn.Module):
         super().__init__()
         import torchvision.models as tvm
 
+        # Portfolio width labels select these backbone/hidden-size groups;
+        # they do not directly scale every convolution by width_mult.
         if width_mult >= 0.75:
             backbone   = tvm.shufflenet_v2_x1_0(pretrained=False)
             gru_hidden = 256
@@ -304,24 +334,26 @@ class ShuffleNetGRU(nn.Module):
         )
 
     def forward(self, x):
+        # Fold time into the CNN batch, then restore the sequence for the GRU.
         B, T, C, H, W = x.shape
-        x = x.view(B * T, C, H, W)         # fold time into batch for the CNN backbone
-        x = self.backbone(x)               # per-frame ShuffleNetV2 feature maps
-        x = self.pool(x).flatten(1)        # global-average-pool -> (B*T, feat_dim)
-        x = self.projection(x)             # feat_dim -> gru_hidden
-        x = x.view(B, T, -1)               # unfold time back out -> (B, T, gru_hidden)
-        gru_out, _ = self.gru(x)           # temporal modeling across the N_FRAMES window
-        context    = self.temporal_attn(gru_out)  # learned weighted pooling over time
+        x = x.view(B * T, C, H, W)
+        x = self.backbone(x)
+        x = self.pool(x).flatten(1)
+        x = self.projection(x)
+        x = x.view(B, T, -1)
+        gru_out, _ = self.gru(x)
+        context    = self.temporal_attn(gru_out)
         context    = self.dropout(context)
         fused      = self.fusion(context)
         return self.agent_head(fused), self.behavior_head(fused)
 
 
-AlexNetLSTM = ShuffleNetGRU   # legacy alias
+# Compatibility alias for earlier callers.
+AlexNetLSTM = ShuffleNetGRU
 
 
-# MODEL PORTFOLIO (accuracy/latency lookup table)
-# Each entry is one candidate model configuration the scheduler can assign
+# Fixed accuracy and nominal inference-latency lookup table.
+# These values are configuration inputs, not measurements from the current run.
 MODEL_REGISTRY = [
     {'name':'ShuffleNetV2x1.0',      'display':'ShuffleNet-1.0',
      'pth':'1.0.pth',         'accuracy':0.925, 'exec_time_ms':233.555,
@@ -355,18 +387,65 @@ MODEL_REGISTRY = [
      'width_mult':0.12, 'int8':True},
 ]
 
-MODEL_NUMBER     = len(MODEL_REGISTRY)                       # q -- portfolio size
-MODEL_ACCURACIES = [m['accuracy']      for m in MODEL_REGISTRY]  # A(m) for each m
-MODEL_EXEC_TIMES = [m['exec_time_ms']  for m in MODEL_REGISTRY]  # C(m) for each m
+MODEL_NUMBER     = len(MODEL_REGISTRY)
+MODEL_ACCURACIES = [m['accuracy']      for m in MODEL_REGISTRY]
+MODEL_EXEC_TIMES = [m['exec_time_ms']  for m in MODEL_REGISTRY]
+
+
+# Validate model eligibility once at startup.
+M_VALID = [m for m in range(MODEL_NUMBER) if MODEL_ACCURACIES[m] >= A_REQ]
+if not M_VALID:
+    raise ValueError(
+        f"A_REQ={A_REQ} excludes every model "
+        f"(max accuracy in portfolio = {max(MODEL_ACCURACIES):.4f}). "
+        f"Lower A_REQ.")
+print(f"[A_REQ]    A_req={A_REQ:.4f} -> M_valid = "
+      f"{len(M_VALID)}/{MODEL_NUMBER} models")
+for _m in range(MODEL_NUMBER):
+    _tag = "eligible" if _m in M_VALID else "EXCLUDED"
+    print(f"           {MODEL_REGISTRY[_m]['display']:22s} "
+          f"A={MODEL_ACCURACIES[_m]:.4f}  {_tag}")
 
 
 def load_shufflenet_gru(pth_path, device, width_mult=1.0, int8=False):
+    """Load checkpoint weights and labels, optionally applying CPU dynamic INT8.
+    
+    Checkpoint label metadata updates the global class lists. Linear and GRU
+    layers are quantized; the convolutional backbone remains floating point.
+    Weight-loading errors are reported but do not abort model construction."""
     global AGENT_CLASSES, BEHAVIOR_CLASSES
 
     ckpt = torch.load(pth_path, map_location=device)
     if "model_state_dict" in ckpt:
         if "agent_classes"    in ckpt: AGENT_CLASSES    = ckpt["agent_classes"]
         if "behavior_classes" in ckpt: BEHAVIOR_CLASSES = ckpt["behavior_classes"]
+    has_own_labels = ("model_state_dict" in ckpt and
+                      "behavior_classes" in ckpt)
+
+
+    # Check available classifier dimensions against the label lists before loading.
+    sd = ckpt.get("model_state_dict", ckpt)
+    n_agent_ckpt = sd["agent_head.2.weight"].shape[0]    if "agent_head.2.weight"    in sd else None
+    n_beh_ckpt   = sd["behavior_head.3.weight"].shape[0] if "behavior_head.3.weight" in sd else None
+
+    if (n_beh_ckpt is not None and n_beh_ckpt != len(BEHAVIOR_CLASSES)
+            and not has_own_labels
+            and n_beh_ckpt == len(LEGACY_BEHAVIOR_CLASSES_7)):
+        print(f"  [WARN] {os.path.basename(pth_path)}: 7 behaviour outputs and "
+              f"no label list -> using legacy 7-class list (no 'Xing').")
+        BEHAVIOR_CLASSES = list(LEGACY_BEHAVIOR_CLASSES_7)
+
+    if n_agent_ckpt is not None and n_agent_ckpt != len(AGENT_CLASSES):
+        raise ValueError(
+            f"{pth_path}: checkpoint has {n_agent_ckpt} agent outputs but "
+            f"AGENT_CLASSES has {len(AGENT_CLASSES)}. Save 'agent_classes' "
+            f"in the checkpoint or fix the list.")
+    if n_beh_ckpt is not None and n_beh_ckpt != len(BEHAVIOR_CLASSES):
+        raise ValueError(
+            f"{pth_path}: checkpoint has {n_beh_ckpt} behaviour outputs but "
+            f"BEHAVIOR_CLASSES has {len(BEHAVIOR_CLASSES)}. Save "
+            f"'behavior_classes' in the checkpoint (same order as training) "
+            f"or fix the list.")
 
     model = ShuffleNetGRU(
         num_agent_classes    = len(AGENT_CLASSES),
@@ -397,15 +476,24 @@ def load_shufflenet_gru(pth_path, device, width_mult=1.0, int8=False):
     return model
 
 
-load_alexnet_lstm = load_shufflenet_gru   # legacy alias
+# Compatibility alias for earlier callers.
+load_alexnet_lstm = load_shufflenet_gru
 
-# ── Load every model in the portfolio once at startup (not per-cycle) ──────
+
+# Load the portfolio once at module initialization; failed entries use the base model.
 print("[MODEL]    Loading ShuffleNetV2-GRU-TemporalAttention models...")
 base_model = load_shufflenet_gru(os.path.join(MODEL_DIR, '1.0.pth'), DEVICE, width_mult=1.0, int8=False)
 print(f"[MODEL]    Agent classes   : {AGENT_CLASSES}")
-print(f"[MODEL]    Behavior classes: {BEHAVIOR_CLASSES}")
+print(f"[MODEL]    Behavior classes ({len(BEHAVIOR_CLASSES)}): {BEHAVIOR_CLASSES}")
+_missing_danger = DANGER_BEHAVIORS - set(BEHAVIOR_CLASSES)
+if _missing_danger:
+    print(f"[WARN]     DANGER_BEHAVIORS not in the model's label set "
+          f"(can never trigger braking): {sorted(_missing_danger)}")
+else:
+    print(f"[MODEL]    DANGER_BEHAVIORS {sorted(DANGER_BEHAVIORS)} "
+          f"all present in label set")
 
-loaded_models = {}   # model registry 'name' -> loaded ShuffleNetGRU instance
+loaded_models = {}
 for reg in MODEL_REGISTRY:
     try:
         m = load_shufflenet_gru(
@@ -413,13 +501,16 @@ for reg in MODEL_REGISTRY:
             width_mult=reg.get('width_mult', 1.0),
             int8=reg.get('int8', False))
         loaded_models[reg['name']] = m
+        assert len(BEHAVIOR_CLASSES) == base_model.behavior_head[-1].out_features, \
+            f"{reg['pth']} changed the label set to a different size than the base model"
         print(f"  [OK]   {reg['name']:30s} <- {reg['pth']}")
     except Exception as e:
         print(f"  [FAIL] {reg['name']:30s} : {e} — using base model")
         loaded_models[reg['name']] = base_model
 print("[MODELS]   All models ready\n")
 
-# ── YOLOv5n: lightweight, fast object detector used for PERCEPTION only ────
+
+# Load YOLOv5 from the local checkout and weights file.
 print("[YOLO]     Loading YOLOv5n...")
 yolo_model = torch.hub.load(
     './yolov5', 'custom', path='yolov5n.pt', source='local'
@@ -429,7 +520,7 @@ yolo_model.classes = YOLO_CLASSES
 print("[YOLO]     Loaded on", next(yolo_model.parameters()).device)
 
 
-# Preprocessing pipeline applied to every cropped detection before it's
+# Resize crops and normalize RGB channels with ImageNet statistics.
 inference_transform = transforms.Compose([
     transforms.Resize((FRAME_SIZE[1], FRAME_SIZE[0])),
     transforms.ToTensor(),
@@ -441,6 +532,9 @@ inference_transform = transforms.Compose([
 
 
 def preprocess_crop(frame_bgr, box, pad=10):
+    """Pad and clip an xyxy box, then return a normalized RGB crop tensor.
+    
+    Use the full frame if the clipped crop is empty."""
     h, w   = frame_bgr.shape[:2]
     x1, y1, x2, y2 = map(int, box)
 
@@ -460,6 +554,7 @@ def preprocess_crop(frame_bgr, box, pad=10):
 
 
 def detect_agents_yolo(frame):
+    """Return a frame copy and supported YOLO detections with pixel coordinates."""
     if frame is None:
         return None, []
 
@@ -477,7 +572,6 @@ def detect_agents_yolo(frame):
         cx = (x1 + x2) // 2
         cy = (y1 + y2) // 2
         agent_label = YOLO_CLASS_MAP[cls_int]
-        color       = AGENT_COLORS.get(agent_label, (200, 200, 200))
 
         detections.append({
             'box'        : (x1, y1, x2, y2),
@@ -487,18 +581,15 @@ def detect_agents_yolo(frame):
             'agent_label': agent_label,
         })
 
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(
-            annotated,
-            f"{agent_label} {conf:.2f}",
-            (x1, max(y1 - 10, 10)),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2
-        )
 
     return annotated, detections
 
 
 def run_inference(model, frame_buffer):
+    """Classify a buffered crop sequence on the selected model's device.
+    
+    Return agent label, behavior label, and their softmax confidences.
+    The input sequence has shape (T, C, H, W) before adding a batch axis."""
     frames  = list(frame_buffer)
     stacked = torch.stack(frames, dim=0)
     model_device = next(model.parameters()).device
@@ -523,22 +614,26 @@ def run_inference(model, frame_buffer):
 
 
 def get_distance(actor1, actor2):
+    """Return Euclidean distance between actor origins in meters."""
     l1 = actor1.get_location()
     l2 = actor2.get_location()
     return math.sqrt((l1.x-l2.x)**2 + (l1.y-l2.y)**2 + (l1.z-l2.z)**2)
 
 
 def get_vehicle_speed_ms(vehicle):
+    """Return the magnitude of actor velocity in meters per second."""
     v = vehicle.get_velocity()
     return math.sqrt(v.x**2 + v.y**2 + v.z**2)
 
 
 def get_ped_speed(ped):
+    """Return the magnitude of pedestrian velocity in meters per second."""
     v = ped.get_velocity()
     return math.sqrt(v.x**2 + v.y**2 + v.z**2)
 
 
 def camera_callback(image):
+    """Copy the latest CARLA BGRA image into the shared BGR frame buffer."""
     global latest_frame
     array        = np.frombuffer(image.raw_data, dtype=np.uint8)
     array        = array.reshape((image.height, image.width, 4))
@@ -547,6 +642,10 @@ def camera_callback(image):
 
 def world_to_camera_pixel(world_loc, vehicle,
                            cam_w=800, cam_h=600, fov=90):
+    """Project a world location using the ego yaw and fixed camera offsets.
+    
+    This approximation ignores pitch and roll. Return None for points behind
+    the camera or outside the image; defaults match the episode RGB sensor."""
     vt      = vehicle.get_transform()
     yaw_rad = math.radians(vt.rotation.yaw)
     cam_x   = vt.location.x + math.cos(yaw_rad) * 2.5
@@ -574,6 +673,10 @@ def world_to_camera_pixel(world_loc, vehicle,
 
 def is_agent_in_detection(agent, vehicle, detections,
                            pixel_threshold=80):
+    """Match an actor's projected origin to the first expanded detection box.
+    
+    Association uses CARLA actor positions, without class matching or a
+    one-to-one assignment constraint."""
     if not detections:
         return False, None
     proj = world_to_camera_pixel(agent.get_location(), vehicle)
@@ -592,6 +695,7 @@ def is_agent_in_detection(agent, vehicle, detections,
 
 
 def is_on_road(world, location):
+    """Check whether a location lies on a driving lane without road projection."""
     carla_map = world.get_map()
     waypoint  = carla_map.get_waypoint(
         location, project_to_road=False,
@@ -603,6 +707,7 @@ def is_on_road(world, location):
 
 
 def get_sidewalk_nav_location(world, attempts=50):
+    """Sample a navigation location outside driving lanes, or return None."""
     for _ in range(attempts):
         loc = world.get_random_location_from_navigation()
         if loc is None:
@@ -613,6 +718,7 @@ def get_sidewalk_nav_location(world, attempts=50):
 
 
 def destroy_ped(entry):
+    """Stop and destroy a pedestrian and controller, then remove cached state."""
     try:
         entry['ctrl'].stop()
         entry['ctrl'].destroy()
@@ -626,6 +732,7 @@ def destroy_ped(entry):
 
 def spawn_single_ped(world, bp_lib, vehicle,
                      fwd_dist, behaviour, ped_index):
+    """Spawn a pedestrian near a forward target and configure its walker controller."""
     vt      = vehicle.get_transform()
     yaw_rad = math.radians(vt.rotation.yaw)
     target  = carla.Location(
@@ -634,7 +741,8 @@ def spawn_single_ped(world, bp_lib, vehicle,
         z = vt.location.z
     )
 
-    # Search for a sidewalk nav-point close to the desired forward offset
+
+    # Choose the sampled non-driving navigation point closest to the forward target.
     best_loc  = None
     best_dist = float('inf')
     for _ in range(80):
@@ -654,7 +762,7 @@ def spawn_single_ped(world, bp_lib, vehicle,
         return None
 
     spawn_loc = carla.Location(x=best_loc.x, y=best_loc.y,
-                               z=best_loc.z + 0.5)   # small z-offset to avoid ground clipping
+                               z=best_loc.z + 0.5)
     if is_on_road(world, spawn_loc):
         return None
 
@@ -668,7 +776,8 @@ def spawn_single_ped(world, bp_lib, vehicle,
     if ped is None:
         return None
 
-    # AI walker controllers need a few world.tick()s after spawn before
+
+    # Advance the world before starting the newly attached walker controller.
     ctrl = world.spawn_actor(ctrl_bp, carla.Transform(),
                              attach_to=ped)
     world.tick()
@@ -677,7 +786,7 @@ def spawn_single_ped(world, bp_lib, vehicle,
     ctrl.start()
 
     dest_1 = get_sidewalk_nav_location(world)
-    dest_2 = get_sidewalk_nav_location(world)   # currently unused, kept for parity/future use
+    dest_2 = get_sidewalk_nav_location(world)
 
     cross_dest    = None
     cross_started = False
@@ -719,6 +828,10 @@ def spawn_single_ped(world, bp_lib, vehicle,
 
 
 def spawn_all_pedestrians(world, bp_lib, vehicle):
+    """Spawn pedestrians using the fixed standing, walking, and crossing mix.
+    
+    The zip below limits attempts to the shorter of the distance and behavior
+    lists; the current behavior list contains ten entries."""
     pedestrians   = []
     fwd_distances = sorted([
         random.uniform(PED_SPREAD_MIN, PED_SPREAD_MAX)
@@ -740,10 +853,11 @@ def spawn_all_pedestrians(world, bp_lib, vehicle):
 
 
 def spawn_all_vehicles(world, bp_lib, vehicle, tm):
+    """Spawn traffic actors on available road points and enable autopilot."""
     spawned_vehicles = []
     carla_map        = world.get_map()
 
-    # Only keep spawn points on a drivable lane with road ahead
+
     all_spawn_pts  = carla_map.get_spawn_points()
     road_spawn_pts = []
     for sp in all_spawn_pts:
@@ -764,7 +878,7 @@ def spawn_all_vehicles(world, bp_lib, vehicle, tm):
 
         road_spawn_pts.append(sp)
 
-    # Exclude spawn points too close to the ego to avoid immediate overlap.
+
     ego_loc = vehicle.get_location()
     road_spawn_pts = [
         sp for sp in road_spawn_pts
@@ -777,7 +891,7 @@ def spawn_all_vehicles(world, bp_lib, vehicle, tm):
     random.shuffle(road_spawn_pts)
     pt_idx = 0
 
-    # How many of each agent type to place (scene composition constants).
+
     spawn_plan = [
         ("Car",    TOTAL_CARS),
         ("Mobike", TOTAL_MOTORCYCLES),
@@ -807,7 +921,8 @@ def spawn_all_vehicles(world, bp_lib, vehicle, tm):
                 except Exception:
                     pass
 
-            # If none of our preferred named blueprints are available in
+
+            # Fall back to category filters when preferred blueprint IDs are unavailable.
             if not bp_candidates:
                 fallback = {
                     "Cyc"    : 'vehicle.*bicycle*',
@@ -826,7 +941,7 @@ def spawn_all_vehicles(world, bp_lib, vehicle, tm):
 
             actor = world.try_spawn_actor(bp, sp)
 
-            # Spawn can fail (e.g. point occupied) -- retry a few more points.
+
             attempts = 0
             while actor is None and attempts < 3 and pt_idx < len(road_spawn_pts):
                 sp     = road_spawn_pts[pt_idx]
@@ -837,7 +952,7 @@ def spawn_all_vehicles(world, bp_lib, vehicle, tm):
             if actor is not None:
                 actor.set_autopilot(True, TM_PORT)
 
-                # Traffic Manager safety/behaviour settings for this vehicle:
+
                 tm.ignore_lights_percentage(actor, 0)
                 tm.ignore_signs_percentage(actor, 0)
                 tm.ignore_vehicles_percentage(actor, 0)
@@ -848,7 +963,7 @@ def spawn_all_vehicles(world, bp_lib, vehicle, tm):
                     actor, random.uniform(0, 20)
                 )
 
-                # Give it an initial throttle nudge so it starts moving
+
                 actor.apply_control(
                     carla.VehicleControl(throttle=0.6, brake=0.0)
                 )
@@ -869,12 +984,14 @@ def spawn_all_vehicles(world, bp_lib, vehicle, tm):
 
     print(f"[SPAWN]    {len(spawned_vehicles)} road vehicles spawned")
     print(f"[SPAWN]    Waiting for TM to initialise all vehicles...")
-    time.sleep(2.0)   # give the Traffic Manager time to send the first
+    # Allow Traffic Manager initialization before entering the episode loop.
+    time.sleep(2.0)
     print(f"[SPAWN]    All vehicles should be moving\n")
     return spawned_vehicles
 
 
 def unstick_vehicles(road_vehicles, vehicle, tm, world):
+    """Nudge idle traffic actors unless at a junction or a red/yellow signal."""
     now       = time.time()
     carla_map = world.get_map()
 
@@ -937,6 +1054,7 @@ def unstick_vehicles(road_vehicles, vehicle, tm, world):
 
 def respawn_single_ahead(world, bp_lib, vehicle,
                          ped_index, pedestrians):
+    """Try to spawn a replacement pedestrian ahead and append it to the scene."""
     fwd_dist  = random.uniform(60.0, 100.0)
     behaviour = random.choice(
         ['standing', 'walking', 'crossing', 'crossing', 'standing']
@@ -948,120 +1066,113 @@ def respawn_single_ahead(world, bp_lib, vehicle,
         print(f"[RESPAWN]  New ped {fwd_dist:.0f}m ahead | {behaviour}")
 
 
-def draw_hud(frame, speed_ms, n_yolo, n_agents,
-             n_moving, n_still, elapsed,
-             brake_active, vehicle_state,
-             intent_lines):
+def draw_hud(frame, speed_ms, brake_active=False):
+    """Return a frame with speed text and an optional braking banner."""
     if frame is None:
         return None
     h, w    = frame.shape[:2]
     display = frame.copy()
 
-    cv2.putText(display, f"Speed      : {speed_ms:.2f} m/s",
-                (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (0, 255, 0), 2)
-    cv2.putText(display, f"State      : {vehicle_state}",
-                (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (0, 0, 255) if brake_active else (0, 255, 0), 2)
-    cv2.putText(display, f"YOLO       : {n_yolo} detected",
-                (10, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (255, 255, 0), 2)
-    cv2.putText(display, f"Agents     : {n_agents} total",
-                (10, 94), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (200, 200, 255), 2)
-    cv2.putText(display, f"Moving     : {n_moving}",
-                (10, 116), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (0, 180, 255), 2)
-    cv2.putText(display, f"Still      : {n_still}",
-                (10, 138), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (180, 255, 180), 2)
-    cv2.putText(display, f"Time       : {elapsed:.1f}s",
-                (10, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (200, 200, 200), 2)
-    cv2.putText(display, f"Deadline   : {DEADLINE_MS:.0f}ms",
-                (10, 182), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (255, 165, 0), 2)
 
-    panel_x = w - 360
-    cv2.rectangle(display, (panel_x - 8, 5), (w - 5, 18 + len(intent_lines) * 22),
-                  (20, 20, 20), -1)
-    cv2.rectangle(display, (panel_x - 8, 5), (w - 5, 18 + len(intent_lines) * 22),
-                  (80, 80, 80), 1)
+    speed_text = f"Speed: {speed_ms:.2f} m/s"
+    (tw, th), baseline = cv2.getTextSize(
+        speed_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+    )
+    pad_x, pad_y = 8, 6
+    x0, y0 = 10, 15
+    cv2.rectangle(
+        display,
+        (x0, y0),
+        (x0 + tw + 2 * pad_x, y0 + th + 2 * pad_y + baseline),
+        (0, 0, 0), -1
+    )
+    cv2.putText(
+        display, speed_text,
+        (x0 + pad_x, y0 + th + pad_y),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+        (0, 255, 0), 2
+    )
 
-    cv2.putText(display, "PREDICTED BEHAVIOR (+1s)",
-                (panel_x, 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
-
-    for i, line in enumerate(intent_lines):
-        cv2.putText(display, line, (panel_x, 40 + i * 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 220, 60), 1)
 
     if brake_active:
-        cv2.rectangle(display, (0, h - 50), (w, h),
-                      (0, 0, 150), -1)
-        cv2.putText(display,
-                    "!!! VEHICLE BRAKING -- DANGER DETECTED !!!",
-                    (10, h - 14),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.75,
-                    (255, 255, 255), 2)
+        banner  = "BRAKE PRESSED!"
+        (bw, bh), bbase = cv2.getTextSize(
+            banner, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3
+        )
+        bpad    = 10
+        bx      = (w - bw) // 2 - bpad
+        by      = h - bh - 2 * bpad - bbase
+        cv2.rectangle(
+            display,
+            (bx, by),
+            (bx + bw + 2 * bpad, h - bpad),
+            (0, 0, 0), -1
+        )
+        cv2.putText(
+            display, banner,
+            (bx + bpad, h - bpad - bbase - 4),
+            cv2.FONT_HERSHEY_SIMPLEX, 1.0,
+            (0, 255, 0), 3
+        )
 
     return display
 
 
-def draw_prediction_on_frame(display, det, agent_pred,
-                              beh_pred, beh_conf,
-                              model_name=""):
-    if det is None:
+def draw_prediction_on_frame(display, det,
+                              agent_pred, beh_pred,
+                              beh_conf, model_name,
+                              is_danger=False):
+    """Draw a detection box and model/behavior labels in place.
+    
+    Use a thicker box for dangerous predictions and omit labels for
+    buffering or skipped jobs. All actor types use the same box color."""
+    if display is None or det is None:
+        return display
+    x1, y1, x2, y2 = det['box']
+    col       = AGENT_COLORS["Ped"]
+    thickness = 3 if is_danger else 2
+    cv2.rectangle(display, (x1, y1), (x2, y2), col, thickness)
+
+
+    if beh_pred in ("buffering...", "buffering",
+                    "skipped", "Skipped", ""):
         return display
 
-    x1, y1, x2, y2 = det['box']
-    color = (0, 220, 60)
 
-    cv2.rectangle(display, (x1, y1), (x2, y2), color, 2)
+    short = model_name.replace("ShuffleNetV2x", "ShuffleNet-")
 
-    if beh_conf > 0:
-        line1 = f"{agent_pred}->{beh_pred} {beh_conf:.0%}"
-    else:
-        line1 = f"{agent_pred}->{beh_pred}"
+    font       = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.55
+    thickness2 = 2
 
-    short_model = model_name[:14] if model_name else ""
-    line2 = f"[{short_model}]" if short_model else ""
+    line1 = short
+    line2 = beh_pred
 
-    (lw1, lh1), _ = cv2.getTextSize(
-        line1, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1
-    )
-    (lw2, lh2), _ = cv2.getTextSize(
-        line2, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1
-    ) if line2 else ((0, 0), None)
+    (w1, h1), _ = cv2.getTextSize(line1, font, font_scale, thickness2)
+    (w2, h2), _ = cv2.getTextSize(line2, font, font_scale, thickness2)
+    pad   = 3
+    box_w = max(w1, w2) + pad * 2
+    box_h = h1 + h2 + pad * 3
 
-    box_w  = max(lw1, lw2) + 8
-    box_h  = lh1 + (lh2 + 4 if line2 else 0) + 8
-    ty     = max(y1 - box_h - 2, 0)
+    tx = x1
+    ty = max(y1 - box_h - 4, 0)
+    cv2.rectangle(display, (tx, ty),
+                  (tx + box_w, ty + box_h), (0, 0, 0), -1)
 
-    cv2.rectangle(display,
-                  (x1, ty), (x1 + box_w, ty + box_h),
-                  (10, 10, 10), -1)
-    cv2.rectangle(display,
-                  (x1, ty), (x1 + box_w, ty + box_h),
-                  color, 1)
-
-    cv2.putText(display, line1,
-                (x1 + 3, ty + lh1 + 3),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
-
-    if line2:
-        cv2.putText(display, line2,
-                    (x1 + 3, ty + lh1 + lh2 + 7),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.38,
-                    (180, 180, 180), 1)
-
+    cv2.putText(display, line1, (tx + pad, ty + pad + h1),
+                font, font_scale, col, thickness2)
+    cv2.putText(display, line2, (tx + pad, ty + pad + h1 + h2 + pad),
+                font, font_scale, col, thickness2)
     return display
 
 
-def main():
-    global video_writer, record_path
+def run_episode(duration_sec: float = RUN_DURATION_S) -> bool:
+    """Run an episode until timeout, collision, user quit, or interruption.
+    
+    Connect to CARLA on localhost:2000 and release spawned actors in the
+    finally block. Return whether a collision was observed; False also
+    includes early user exits and does not imply a completed episode."""
 
-    # ── Connect to the running CARLA server (must be started separately) ──
     client = carla.Client('localhost', 2000)
     client.set_timeout(10.0)
 
@@ -1070,15 +1181,24 @@ def main():
     spawn_pts = world.get_map().get_spawn_points()
 
     world.set_weather(carla.WeatherParameters.ClearNoon)
-    print(f"[WORLD]    Map : {world.get_map().name}")
+    print(f"[WORLD]    Map : {world.get_map().name}  (single run)")
 
     vehicle     = None
     pedestrians = []
     road_vehicles = []
     camera      = None
     col_sensor  = None
-    csv_file    = None
-    detail_log_file = None
+
+
+    # Mutable flag shared with the collision callback; count at most one crash per run.
+    crashed = [False]
+
+    def on_collision(event):
+        if crashed[0]:
+            return
+        crashed[0] = True
+        print(f"\n  !! CRASH -- run ending "
+              f"(hit {event.other_actor.type_id})\n")
 
     try:
         vehicle_bp = bp_lib.filter('vehicle.tesla.model3')[0]
@@ -1090,7 +1210,7 @@ def main():
         print(f"[VEHICLE]  Spawned at "
               f"({v_spawn.location.x:.2f},{v_spawn.location.y:.2f})")
 
-        # ── Forward-facing RGB camera (PERCEPTION sensor) ──────────────
+
         cam_bp = bp_lib.find('sensor.camera.rgb')
         cam_bp.set_attribute('image_size_x', '800')
         cam_bp.set_attribute('image_size_y', '600')
@@ -1103,30 +1223,27 @@ def main():
         camera.listen(camera_callback)
         print("[CAMERA]   Attached")
 
-        # ── Collision sensor -- just logs to console; ground-truth
+
         col_bp     = bp_lib.find('sensor.other.collision')
         col_sensor = world.spawn_actor(
             col_bp, carla.Transform(), attach_to=vehicle
         )
-        col_sensor.listen(
-            lambda e: print(
-                f"\n  !! COLLISION with {e.other_actor.type_id} !!\n"
-            )
-        )
+        col_sensor.listen(on_collision)
 
-        # ── Traffic Manager: governs autopilot behaviour for every
+
         tm = client.get_trafficmanager(TM_PORT)
         tm.set_synchronous_mode(False)
-        tm.set_random_device_seed(42)   # reproducible traffic behaviour
+        # Seed Traffic Manager only; Python random scene sampling remains unseeded.
+        tm.set_random_device_seed(42)
 
         tm.set_global_distance_to_leading_vehicle(3.0)
         tm.global_percentage_speed_difference(10.0)
 
-        # ── Populate the scene (see spawn_all_pedestrians / spawn_all_vehicles) ──
+
         pedestrians      = spawn_all_pedestrians(world, bp_lib, vehicle)
         road_vehicles    = spawn_all_vehicles(world, bp_lib, vehicle, tm)
 
-        # ── Release the ego onto autopilot. NOTE: ignore_vehicles_percentage=0
+
         time.sleep(1.0)
         vehicle.set_autopilot(True, TM_PORT)
         tm.ignore_lights_percentage(vehicle, 0)
@@ -1136,37 +1253,6 @@ def main():
         tm.auto_lane_change(vehicle, False)
         tm.vehicle_percentage_speed_difference(vehicle, 20)
         print("[VEHICLE]  Ego vehicle released")
-
-        # ── Output video recording (for qualitative/visual review) ─────
-        record_path  = os.path.join(
-            RECORD_DIR,
-            time.strftime("scene_%Y%m%d_%H%M%S.avi")
-        )
-        video_writer = cv2.VideoWriter(
-            record_path,
-            cv2.VideoWriter_fourcc(*'XVID'),
-            RECORD_FPS, (800, 600)
-        )
-        print(f"[RECORD]   Recording to {record_path}")
-
-        # ── Logging: one CSV row + one JSON line per cycle ─────────────
-        run_tag    = time.strftime("%Y%m%d_%H%M%S")
-        log_path   = os.path.join(LOG_DIR, f"analysis_{run_tag}.csv")
-        detail_log_path = os.path.join(LOG_DIR, f"analysis_{run_tag}.jsonl")
-
-        csv_file   = open(log_path, 'w', newline='')
-        csv_writer = csv.writer(csv_file)
-        csv_writer.writerow([
-            'timestamp', 'elapsed_s', 'n_visible_agents',
-            'n_assigned', 'n_skipped',
-            'avg_acc_all', 'total_weighted_accuracy',
-            'deadline_ms', 'solver_ms',
-            'vehicle_speed_ms', 'brake_active',
-            'ttc_values', 'agent_types', 'behaviors', 'models_used'
-        ])
-        detail_log_file = open(detail_log_path, 'w')
-        print(f"[LOG]      Summary CSV : {log_path}")
-        print(f"[LOG]      Per-object  : {detail_log_path}")
 
         spectator = world.get_spectator()
         cv2.namedWindow(
@@ -1182,6 +1268,7 @@ def main():
         print(f"  Cyclists         : {TOTAL_BICYCLES}")
         print(f"  Buses            : {TOTAL_BUSES}")
         print(f"  Large vehicles   : {TOTAL_TRUCKS}")
+        print(f"  Duration cap     : {duration_sec:.0f}s (or until crash)")
         print(f"  Deadline         : {DEADLINE_MS} ms per cycle")
         print(f"  Models           : {MODEL_NUMBER}")
         print(f"  Agent classes    : {AGENT_CLASSES}")
@@ -1193,22 +1280,39 @@ def main():
 
         start_time       = time.time()
         was_braking      = False
-        brake_hold       = False   # latches the brake across cycles until
+        brake_hold_start_time = None
+        brake_hold       = False
         ped_counter      = TOTAL_PEDS + 1
         detections       = []
         last_unstick_check = time.time()
 
-        # MAIN LOOP -- runs once per available camera frame
+
+        # Actor ID -> deferred job. Fresh detections replace stale entries on re-admission.
+        deferred_jobs    = {}
+
+
+        # Process the latest available image; the loop does not wait for a new camera frame.
         while True:
             now     = time.time()
             elapsed = now - start_time
 
-            # Periodically nudge any vehicle that's genuinely stuck (not
+            if elapsed >= duration_sec:
+                print(f"\n[RUN] Duration reached "
+                      f"({duration_sec:.0f}s) -- ending episode.")
+                break
+
+            if crashed[0]:
+                print(f"\n[RUN] Crash detected -- "
+                      f"ending episode early at {elapsed:.1f}s.")
+                break
+
+
+            # Recover idle traffic periodically while preserving traffic-light/junction stops.
             if now - last_unstick_check > UNSTICK_INTERVAL:
                 last_unstick_check = now
                 unstick_vehicles(road_vehicles, vehicle, tm, world)
 
-            # ── Trigger crossing pedestrians ───────────────────────────
+
             for entry in pedestrians:
                 if (entry['behaviour'] == 'crossing' and
                         not entry['cross_started'] and
@@ -1224,7 +1328,7 @@ def main():
                             random.uniform(1.2, 1.6)
                         )
 
-            # ── Detect when a crossing pedestrian has finished crossing ──
+
             for entry in pedestrians:
                 if (entry['behaviour'] == 'crossing' and
                         entry['cross_started'] and
@@ -1235,7 +1339,7 @@ def main():
                         entry['cross_done'] = True
                         entry['ctrl'].set_max_speed(0.0)
 
-            # ── Recycle pedestrians that have wandered too far away ────
+
             to_remove = []
             for entry in pedestrians:
                 try:
@@ -1252,7 +1356,7 @@ def main():
                                      ped_counter, pedestrians)
                 ped_counter += 1
 
-            # Spectator camera trails behind/above the ego (cosmetic only)
+
             vt = vehicle.get_transform()
             spectator.set_transform(
                 carla.Transform(
@@ -1267,7 +1371,8 @@ def main():
             display_frame = None
             detections    = []
 
-            # ── STAGE 1: PERCEPTION -- run YOLO on the latest frame, then
+
+            # Perception: detect objects and append crops using simulator-based association.
             if latest_frame is not None:
                 annotated, detections = detect_agents_yolo(latest_frame)
                 n_yolo        = len(detections)
@@ -1315,7 +1420,7 @@ def main():
             n_still       = 0
             intent_lines  = []
 
-            # visible_agents = actors currently matched to a YOLO detection
+
             visible_agents = []
 
             for entry in pedestrians:
@@ -1358,9 +1463,32 @@ def main():
                 except Exception:
                     pass
 
-            # ── STAGE 2: SAFETY ANALYSIS -- estimate time-to-collision
+
+            # Merge current detections with deferred live actors, without duplicate actor IDs.
+            # Undetected deferred actors retain prior crops but lose their display boxes.
+            current_map = {va['actor'].id: va for va in visible_agents}
+            for aid_d, va_prev in list(deferred_jobs.items()):
+                if aid_d in current_map:
+
+                    current_map[aid_d]['deferred_count'] = \
+                        va_prev.get('deferred_count', 0)
+                    continue
+                try:
+                    alive = va_prev['actor'].is_alive
+                except Exception:
+                    alive = False
+                if not alive:
+                    deferred_jobs.pop(aid_d, None)
+                    continue
+                va_prev['det'] = None
+                visible_agents.append(va_prev)
+                current_map[aid_d] = va_prev
+
+
+            # Safety analysis: heuristic TTC from simulator distance and speed magnitudes,
+            # not a trajectory-intersection or full relative-velocity calculation.
             raw_spd  = get_vehicle_speed_ms(vehicle)
-            car_spd  = raw_spd if raw_spd > 0.5 else 1.0   # avoid div-by-zero when parked
+            car_spd  = raw_spd if raw_spd > 0.5 else 1.0
             ttc_list = []
             for va in visible_agents:
                 dist     = get_distance(vehicle, va['actor'])
@@ -1387,7 +1515,9 @@ def main():
 
                 ttc_list.append(ttc)
 
-            # Immediate proximity-brake pre-check (independent of scheduler)
+
+            # Evaluate proximity braking independently of model assignment.
+            # The control command is applied later, after sequential predictions finish.
             proximity_brake       = False
             proximity_brake_dist  = None
             ego_tf                = vehicle.get_transform()
@@ -1451,6 +1581,7 @@ def main():
                 except Exception:
                     pass
 
+            # Image-space proximity fallback using central box position and relative area.
             if not proximity_brake and detections and latest_frame is not None:
                 frame_h    = latest_frame.shape[0]
                 frame_w    = latest_frame.shape[1]
@@ -1475,7 +1606,8 @@ def main():
                 vehicle_state = "BRAKING"
                 print(f"  [BRAKE]  Object detected in front")
 
-            # ── STAGE 3: SCHEDULING -- the core RETINA contribution.
+
+            # Schedule visible/deferred jobs, including actors whose crop buffers are not full.
             if len(visible_agents) > 0:
                 solver_start             = time.time()
                 schedule, job_weights    = run_scheduler(
@@ -1498,10 +1630,10 @@ def main():
                 behaviors_log   = []
                 n_assigned    = 0
                 n_skipped_cnt = 0
-                frame_timestamp = datetime.now().isoformat(timespec='milliseconds')
                 per_object    = []
 
-                # STAGE 4: PREDICTION -- run/reuse prediction per scheduled job
+
+                # Execute assigned predictions sequentially in job order; no inference preemption.
                 for job_id, model_id in schedule:
                     va         = visible_agents[job_id]
                     actor      = va['actor']
@@ -1511,7 +1643,8 @@ def main():
                     cross_done = va['cross_done']
                     buf_size   = len(agent_frame_buffers.get(aid, []))
 
-                    # Case A: scheduler assigned a model AND we already
+
+                    # Run inference only when an assigned job has a full observation window.
                     if model_id is not None and buf_size >= N_FRAMES:
                         model_name    = MODEL_REGISTRY[model_id]['name']
                         display_model = MODEL_REGISTRY[model_id]['display']
@@ -1520,6 +1653,8 @@ def main():
                             run_inference(sel_model,
                                          agent_frame_buffers[aid])
                         agent_predictions[aid] = (agent_pred, beh_pred)
+                        deferred_jobs.pop(aid, None)
+                        va['deferred_count'] = 0
                         n_assigned   += 1
                         model_acc     = MODEL_ACCURACIES[model_id]
                         assigned_accs.append(model_acc)
@@ -1529,7 +1664,8 @@ def main():
                         agent_types_log.append(agent_pred)
                         behaviors_log.append(beh_pred)
 
-                    # Case B: scheduler assigned a model, but we haven't
+
+                    # A buffering job clears deferral but does not perform inference this cycle.
                     elif model_id is not None:
                         prev = agent_predictions.get(
                             aid, (va['agent_type'], "buffering...")
@@ -1538,6 +1674,8 @@ def main():
                         agent_conf = beh_conf = 0.0
                         model_name    = MODEL_REGISTRY[model_id]['name']
                         display_model = MODEL_REGISTRY[model_id]['display']
+                        deferred_jobs.pop(aid, None)
+                        va['deferred_count'] = 0
                         models_used.append('BUF')
                         agent_types_log.append(agent_pred)
                         behaviors_log.append(beh_pred)
@@ -1549,6 +1687,9 @@ def main():
                         agent_conf = beh_conf = 0.0
                         model_name    = "SKIPPED"
                         display_model = "skipped"
+                        va['deferred_count'] = va.get('deferred_count', 0) + 1
+                        # Retain skipped jobs for re-admission in the next cycle.
+                        deferred_jobs[aid] = va
                         n_skipped_cnt += 1
                         models_used.append('SKIP')
                         agent_types_log.append(agent_pred)
@@ -1563,13 +1704,15 @@ def main():
                         'model'         : display_model,
                         'behavior'      : beh_pred,
                         'behavior_conf' : round(beh_conf, 3),
+                        'deferred_cycles': va.get('deferred_count', 0),
                     })
 
-                    if (beh_pred in DANGER_BEHAVIORS and
-                            dist < BRAKE_DIST and
-                            beh_conf >= CONF_THRESHOLD and
-                            not cross_done and
-                            model_id is not None):
+                    is_danger = (beh_pred in DANGER_BEHAVIORS and
+                                 dist < BRAKE_DIST and
+                                 beh_conf >= CONF_THRESHOLD and
+                                 not cross_done and
+                                 model_id is not None)
+                    if is_danger:
                         brake_active  = True
                         vehicle_state = "BRAKING"
 
@@ -1578,7 +1721,7 @@ def main():
                         display_frame = draw_prediction_on_frame(
                             display_frame, det,
                             agent_pred, beh_pred, beh_conf,
-                            display_model
+                            display_model, is_danger
                         )
 
                     warn = "!" if (brake_active and
@@ -1606,53 +1749,20 @@ def main():
                       f"State={vehicle_state} "
                       f"brake={brake_active}")
 
-                avg_acc_all = (
-                    sum(assigned_accs) / len(assigned_accs)
-                    if assigned_accs else 0.0
-                )
-                weighted_acc = avg_acc_all
-
-                csv_writer.writerow([
-                    frame_timestamp,
-                    f"{elapsed:.2f}",
-                    len(visible_agents),
-                    n_assigned,
-                    n_skipped_cnt,
-                    f"{avg_acc_all:.4f}",
-                    f"{weighted_acc:.4f}",
-                    DEADLINE_MS,
-                    f"{solver_ms:.2f}",
-                    f"{speed_ms:.2f}",
-                    int(brake_active),
-                    ';'.join([f"{t:.2f}" for t in ttc_list]),
-                    ';'.join(agent_types_log),
-                    ';'.join(behaviors_log),
-                    '|'.join(models_used),
-                ])
-                csv_file.flush()
-
-                detail_log_file.write(json.dumps({
-                    'timestamp'    : frame_timestamp,
-                    'elapsed_s'    : round(elapsed, 2),
-                    'n_detected'   : len(visible_agents),
-                    'n_assigned'   : n_assigned,
-                    'n_skipped'    : n_skipped_cnt,
-                    'vehicle_speed_ms': round(speed_ms, 2),
-                    'brake_active' : brake_active,
-                    'objects'      : per_object,
-                }) + '\n')
-                detail_log_file.flush()
-
             if brake_active and not was_braking:
                 print(f"\n  *** VEHICLE BRAKING ***")
             if not brake_active and was_braking:
                 print("\n  *** VEHICLE RESUMING ***")
             was_braking = brake_active
 
-            # ── STAGE 5: CONTROL -- brake-hold latch.
+
             if brake_active:
+                if not brake_hold:
+                    brake_hold_start_time = time.time()
                 brake_hold = True
             elif brake_hold:
+                # Hold braking while a pooled actor has a cached dangerous behavior,
+                # without rechecking distance or confidence in this release condition.
                 still_danger = any(
                     agent_predictions.get(va['actor'].id,
                                          ("", ""))[1] in DANGER_BEHAVIORS
@@ -1660,9 +1770,11 @@ def main():
                     for va in visible_agents
                 )
                 if not still_danger:
-                    brake_hold = False
+                    brake_hold            = False
+                    brake_hold_start_time = None
 
-            # Override the Traffic Manager's autopilot with a manual full
+
+            # Override autopilot with full braking while the latch is active.
             if brake_hold:
                 vehicle.set_autopilot(False, TM_PORT)
                 vehicle.apply_control(
@@ -1674,65 +1786,47 @@ def main():
             else:
                 vehicle.set_autopilot(True, TM_PORT)
 
+
+            # Show the braking banner after the latch has been held for one second.
+            show_brake_banner = (
+                brake_hold and
+                brake_hold_start_time is not None and
+                (time.time() - brake_hold_start_time) >= 1.0
+            )
             if display_frame is not None:
-                hud = draw_hud(
-                    display_frame, speed_ms, n_yolo,
-                    len(pedestrians) + len(road_vehicles),
-                    n_moving, n_still,
-                    elapsed, brake_active, vehicle_state,
-                    intent_lines
-                )
+                hud = draw_hud(display_frame, speed_ms, show_brake_banner)
                 if hud is not None:
                     cv2.imshow(
                         "CARLA - ROAD Multi-Agent Behavior Prediction",
                         hud
                     )
-                    if video_writer is not None:
-                        video_writer.write(hud)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
-                print("Quit.")
+                print(f"\n[RUN] Ended early by user.")
                 break
 
-            time.sleep(0.05)   # small yield so this isn't a pure busy-loop
+            time.sleep(0.05)
 
     except KeyboardInterrupt:
-        print("\nStopping...")
+        print("\nStopping episode...")
 
-    # ── Cleanup: always run, even on Ctrl+C or an unhandled exception,
+
+    # Attempt sensor and actor cleanup on normal exit, interruption, or error.
     finally:
-        print("\nCleaning up...")
+        print(f"[RUN] Cleaning up...  "
+              f"(crashed: {'YES' if crashed[0] else 'no'})")
         cv2.destroyAllWindows()
-
-        try:
-            csv_file.close()
-            print(f"  [OK] Summary log saved to {log_path}")
-        except Exception:
-            pass
-
-        try:
-            detail_log_file.close()
-            print(f"  [OK] Per-object log saved to {detail_log_path}")
-        except Exception:
-            pass
-
-        if video_writer is not None:
-            video_writer.release()
-            print(f"  [OK] Video saved to {record_path}")
 
         if camera:
             camera.stop()
             camera.destroy()
-            print("  [OK] Camera destroyed")
 
         if col_sensor:
             col_sensor.stop()
             col_sensor.destroy()
-            print("  [OK] Collision sensor destroyed")
 
         for entry in pedestrians:
             destroy_ped(entry)
-        print(f"  [OK] {len(pedestrians)} peds destroyed")
 
         for rv in road_vehicles:
             try:
@@ -1740,15 +1834,32 @@ def main():
                 rv['actor'].destroy()
             except Exception:
                 pass
-        print(f"  [OK] {len(road_vehicles)} road vehicles destroyed")
 
         if vehicle:
             vehicle.set_autopilot(False)
             vehicle.destroy()
-            print("  [OK] Vehicle destroyed")
 
-        print("Done.")
+    return crashed[0]
+
+
+def run_single():
+    """Run one episode and append its collision flag to logs/RETINA/retina_runs.csv."""
+    crashed = run_episode(duration_sec=RUN_DURATION_S)
+
+    summary_dir = os.path.join(LOG_DIR, "RETINA")
+    os.makedirs(summary_dir, exist_ok=True)
+    summary_path = os.path.join(summary_dir, "retina_runs.csv")
+    is_new = not os.path.exists(summary_path)
+    with open(summary_path, 'a', newline='') as f:
+        writer = csv.writer(f)
+        if is_new:
+            writer.writerow(['timestamp', 'crashed'])
+        writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), int(crashed)])
+
+    print(f"\n[RESULT]   {'CRASHED' if crashed else 'safe'}  "
+          f"-> appended to {summary_path}")
+    return crashed
 
 
 if __name__ == '__main__':
-    main()
+    run_single()
