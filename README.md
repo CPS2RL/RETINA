@@ -16,15 +16,13 @@ https://github.com/user-attachments/assets/701904cb-8d11-40bb-8600-f3704b1b469e
 - [Installing Carla Package](##installing-carla-package)
 - [Downloading Pretrained YOLOv5n Weights](##downloading-pretrained-yolov5n-weights)
 - [Optimizer Setup](##optimizer-setup)
-- [Baseline Comparisons](##experiment:_baseline_comparisons)
-<!--
-- [Running the Experiments](##running-the-experiments)
+- [Baseline Comparisons](##experiment:-baseline-comparisons)
+<!--- [Running the Experiments](##running-the-experiments)
     - [Baseline Comparisons](##experiment:_baseline_comparisons)
     - [Solver Overhead](##experiment:_solver_overhead)
     - [Urgent and Non-urgent Jobs Percentage](##experiment:_urgent_and_non-urgent_jobs_percentage)
     - [Safe Jobs](##experiment:_Safe_Jobs)
-- [Reproducing the Results](#reproducing-the-results)
--->
+- [Reproducing the Results](#reproducing-the-results)-->
 - [Hardware Feasibility Test](#hardware-feasibility-test)
 
 
