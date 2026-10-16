@@ -16,7 +16,7 @@ https://github.com/user-attachments/assets/701904cb-8d11-40bb-8600-f3704b1b469e
 - [Installing Carla Package](##installing-carla-package)
 - [Downloading Pretrained YOLOv5n Weights](##downloading-pretrained-yolov5n-weights)
 - [Optimizer Setup](##optimizer-setup)
-- [Baseline Comparisons](##experiment)
+- [Baseline Comparisons](##baseline-comparisons)
 <!--- [Running the Experiments](##running-the-experiments)
     - [Baseline Comparisons](##experiment:_baseline_comparisons)
     - [Solver Overhead](##experiment:_solver_overhead)
@@ -144,7 +144,7 @@ Make sure the license is installed inside the same Python environment used to ru
 
 {TBD}
 -->
-## **Experiment**
+## **Baseline Comparisons**
 
 >cd path_to_RETINA\CARLA    \
 python .\RETINA.py  \
