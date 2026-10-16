@@ -152,6 +152,7 @@ python .\RETINA-LOW
 
 {TBD}
 -->
+<!--
 **Experiment: Solver Overhead**
 
 In this experiment we measure the time to the problem in RETINA. To have an idea of the solve time we have meassured the average solver overhead by varying number of jobs, model configurations and deadline. Additionally, the P95th solve time and well as the max solve time can be measured. Uncomment line (130,140) in `solver_overhead.py` to do so.
@@ -180,11 +181,11 @@ In this experiment, we measure the number of jobs that are safe served by differ
 python3 safe.py
 
 Output files are saved in the same directory.
-
+-->
 ---
-
-## **Reproducing the Results**
 <!--
+## **Reproducing the Results**
+
 **Experiment: Scheduler Behavior Under Deadline**
 
 {TBD}
@@ -200,7 +201,7 @@ Output files are saved in the same directory.
 **Experiment: Performance Comparisons**
 
 {TBD}
--->
+
 Running all the experiments may take a significant amount of time. For convenience, we provide the output files in each experiment directory. These output files can be used to regenerate results reported in the paper.
 
 **Experiment: Solver Overhead**
@@ -242,11 +243,9 @@ The generated figures will be saved in:
 Output: RETINA/Exp_Safe_vs_Unsafe/
 
 ---
-
+-->
 ## **Hardware Feasibility Test**
 
-To perform the hardware evaluation, we used the rover from [here](https://www.waveshare.com/product/ugv01.htm). On top of it, we mounted a camera sensor from [here](https://www.waveshare.com/product/robotics/robot-arm-control/pan-tilt-control/2-axis-pan-tilt-camera-module.htm). A testbed is designed by placing toy road tapes, cars and humanoid figures. Load the code from `RETINA/Feasibility_Test` to the robot and perform the hardware feasiblity test.
-
-In the hardware experiment, we have trained the YOLO model offline and put it in the ROVER folder. It is recommended to profile the prediction models on the hardware before running. Profiling can be done using the `profile_behavior_models.py`. Result should be saved in file `config.py` (line 71,134). In file `config.py` line (11,16) consists the scheduling algorithm, uncomment the desried one and comment others before running. Use the `main.py` to do the rover simulation.
+To perform the hardware evaluation, we used the rover from [here](https://www.waveshare.com/product/ugv01.htm). On top of it, we mounted a camera sensor from [here](https://www.waveshare.com/product/robotics/robot-arm-control/pan-tilt-control/2-axis-pan-tilt-camera-module.htm). A testbed is designed by placing toy road tapes, cars and humanoid figures. Load the code from `RETINA/Feasibility_Test` to the robot and perform the hardware feasiblity test. In the hardware experiment, we have trained the YOLO model offline and put it in the ROVER folder. 
 
 Install the necessary python library listed in `requirements.txt`.
