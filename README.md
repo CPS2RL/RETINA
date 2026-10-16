@@ -16,12 +16,15 @@ https://github.com/user-attachments/assets/701904cb-8d11-40bb-8600-f3704b1b469e
 - [Installing Carla Package](##installing-carla-package)
 - [Downloading Pretrained YOLOv5n Weights](##downloading-pretrained-yolov5n-weights)
 - [Optimizer Setup](##optimizer-setup)
+- [Baseline Comparisons](##experiment:_baseline_comparisons)
+<!--
 - [Running the Experiments](##running-the-experiments)
     - [Baseline Comparisons](##experiment:_baseline_comparisons)
     - [Solver Overhead](##experiment:_solver_overhead)
     - [Urgent and Non-urgent Jobs Percentage](##experiment:_urgent_and_non-urgent_jobs_percentage)
     - [Safe Jobs](##experiment:_Safe_Jobs)
 - [Reproducing the Results](#reproducing-the-results)
+-->
 - [Hardware Feasibility Test](#hardware-feasibility-test)
 
 
@@ -129,9 +132,12 @@ Make sure the license is installed inside the same Python environment used to ru
 
 ---
 
-## **Running the Experiments**
+
 
 <!--
+
+## **Running the Experiments**
+
 **Experiment: Scheduler Behavior Under Deadline**
 
 {TBD}
@@ -140,7 +146,7 @@ Make sure the license is installed inside the same Python environment used to ru
 
 {TBD}
 -->
-**Experiment: Baseline Comparisons**
+## **Experiment: Baseline Comparisons**
 
 >cd path_to_RETINA\CARLA    \
 python .\RETINA.py  \
