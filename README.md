@@ -17,12 +17,6 @@ https://github.com/user-attachments/assets/701904cb-8d11-40bb-8600-f3704b1b469e
 - [Downloading Pretrained YOLOv5n Weights](##downloading-pretrained-yolov5n-weights)
 - [Optimizer Setup](##optimizer-setup)
 - [Baseline Comparisons](##baseline-comparisons)
-<!--- [Running the Experiments](##running-the-experiments)
-    - [Baseline Comparisons](##experiment:_baseline_comparisons)
-    - [Solver Overhead](##experiment:_solver_overhead)
-    - [Urgent and Non-urgent Jobs Percentage](##experiment:_urgent_and_non-urgent_jobs_percentage)
-    - [Safe Jobs](##experiment:_Safe_Jobs)
-- [Reproducing the Results](#reproducing-the-results)-->
 - [Hardware Feasibility Test](#hardware-feasibility-test)
 
 
@@ -132,18 +126,7 @@ Make sure the license is installed inside the same Python environment used to ru
 
 
 
-<!--
 
-## **Running the Experiments**
-
-**Experiment: Scheduler Behavior Under Deadline**
-
-{TBD}
-
-**Experiment: Per-Object Model Selection Over Time**
-
-{TBD}
--->
 ## **Baseline Comparisons**
 
 >cd path_to_RETINA\CARLA    \
@@ -151,103 +134,7 @@ python .\RETINA.py  \
 python .\CAMOT  \
 python .\RETINA-HIGH    \
 python .\RETINA-LOW
-<!--
-**Experiment: Performance Comparisons**
 
-{TBD}
--->
-<!--
-**Experiment: Solver Overhead**
-
-In this experiment we measure the time to the problem in RETINA. To have an idea of the solve time we have meassured the average solver overhead by varying number of jobs, model configurations and deadline. Additionally, the P95th solve time and well as the max solve time can be measured. Uncomment line (130,140) in `solver_overhead.py` to do so.
-
->cd RETINA/Exp_ Solver Overhead/    \
-python3 solver_overhead.py
-
-Two kind of csv files will be save. One contains solve time for all iteration, and for convenience a summary csv file is also saved.
-
-Output: RETINA/Exp_Solver_Overhead/solver_overhead/
-
-**Experiment: Urgent and Non-urgent Jobs Percentage**
-
-In this experiment, we measure the the urgent and non-urgent jobs (%) while varying the deadline. 
-
->cd RETINA/Exp_Urgent_vs_Non_urgent/    \
-python3 urgent_non_urgent.py
-
-Output files are saved in the same directory.
-
-**Experiment: Safe Jobs**
-
-In this experiment, we measure the number of jobs that are safe served by different algorithms while varying the deadline. 
-
->cd RETINA/Exp_Safe_vs_Unsafe/    \
-python3 safe.py
-
-Output files are saved in the same directory.
--->
----
-<!--
-## **Reproducing the Results**
-
-**Experiment: Scheduler Behavior Under Deadline**
-
-{TBD}
-
-**Experiment: Per-Object Model Selection Over Time**
-
-{TBD}
-
-**Experiment: Safe Navigation**
-
-{TBD}
-
-**Experiment: Performance Comparisons**
-
-{TBD}
-
-Running all the experiments may take a significant amount of time. For convenience, we provide the output files in each experiment directory. These output files can be used to regenerate results reported in the paper.
-
-**Experiment: Solver Overhead**
-
-In this we have measured the solver overhead by varying number of jobs, model configurations and deadline. The number of jobs varies from 1 to 30 and model configurations is varied as 5, 10 and 15.
-
-To reproduce the results corresponding to Fig. 12(a)-(b), run:
-
->cd RETINA/Exp_ Solver Overhead/    \
-python3 plot_overhead_D150.py   \
-python3 plot_overhead_D200.py   
-
-The generated figures will be saved in:
-
-Output: RETINA/Exp_Solver_Overhead/
-
-**Experiment: Urgent and Non-urgent Jobs Percentage**
-
-To reproduce the results corresponding to Fig. 13(a)-(b), run:
-
->cd RETINA/Exp_Urgent_vs_Non_urgent/    \
-python3 plot_percentage_D150.py   \
-python3 plot_percentage_D190.py   
-
-The generated figures will be saved in:
-
-Output: RETINA/Exp_Urgent_vs_Non_urgent/
-
-**Experiment: Safe Jobs**
-
-To reproduce the results corresponding to Fig. 14(a)-(b), run:
-
->cd RETINA/Exp_Safe_vs_Unsafe/    \
-python3 plot_safe_D200.py   \
-python3 plot_safe_D250.py   
-
-The generated figures will be saved in:
-
-Output: RETINA/Exp_Safe_vs_Unsafe/
-
----
--->
 ## **Hardware Feasibility Test**
 
 To perform the hardware evaluation, we used the rover from [here](https://www.waveshare.com/product/ugv01.htm). On top of it, we mounted a camera sensor from [here](https://www.waveshare.com/product/robotics/robot-arm-control/pan-tilt-control/2-axis-pan-tilt-camera-module.htm). A testbed is designed by placing toy road tapes, cars and humanoid figures. Load the code from `RETINA/Feasibility_Test` to the robot and perform the hardware feasiblity test. In the hardware experiment, we have trained the YOLO model offline and put it in the ROVER folder. 
