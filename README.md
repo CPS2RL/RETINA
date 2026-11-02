@@ -131,9 +131,10 @@ Make sure the license is installed inside the same Python environment used to ru
 
 >cd path_to_RETINA\CARLA    \
 python .\RETINA.py  \
-python .\CAMOT  \
-python .\RETINA-HIGH    \
-python .\RETINA-LOW
+python .\CAMOT.py  \
+python .\RTDeepIoT.py  \
+python .\RETINA-HIGH.py    \
+python .\RETINA-LOW.py
 
 ## **Hardware Feasibility Test**
 
