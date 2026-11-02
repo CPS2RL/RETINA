@@ -1,4 +1,3 @@
-
 import carla
 import math
 import time
@@ -12,6 +11,8 @@ import os
 import csv
 import json
 from datetime import datetime
+import gurobipy as gp
+from gurobipy import GRB
 from torchvision import models
 from torchvision import transforms
 from collections import deque
@@ -49,6 +50,7 @@ LOG_DIR              = "logs"
 MODEL_DIR            = "model"     # directory containing the .pth checkpoints
 DEADLINE_MS          = 500.0       # D -- per-cycle scheduling deadline
 
+SCHEDULER_OVERHEAD_MS = 6.0    # Delta_s -- reserved solver-overhead budget
 UNSTICK_INTERVAL     = 3.0     # seconds between checks for vehicles stuck idle
 
 # Candidate CARLA blueprints for each spawned agent type (picked at random
@@ -78,27 +80,92 @@ VEHICLE_BP_FILTERS = {
 
 
 def run_scheduler(job_number, ttc_list, deadline_ms=DEADLINE_MS):
-    # Baseline scheduler: no accuracy optimization, always uses FIXED_MODEL_ID.
-    # Only decides WHICH objects get served this cycle, by urgency (TTC).
+    # RETINA's ILP scheduler with the model set restricted to the single
+    # fixed model (the most accurate one): same urgency rules, objective,
+    # constraints and effective deadline D' = D - Delta_s.
     if job_number == 0:
         return [], []
 
-    exec_time = MODEL_EXEC_TIMES[FIXED_MODEL_ID]
-
-    # Serve most urgent (smallest TTC) objects first; admit greedily
-    # until the fixed model's execution time no longer fits the budget.
-    order = sorted(range(job_number), key=lambda j: ttc_list[j])
-
-    schedule = []
-    cumulative_time = 0.0
-    for job_id in order:
-        if cumulative_time + exec_time <= deadline_ms:
-            schedule.append((job_id, FIXED_MODEL_ID))
-            cumulative_time += exec_time
+    D_sec = deadline_ms / 1000.0
+    eta, weight = [], []
+    for ttc in ttc_list:
+        if math.isfinite(ttc) and ttc > 0:
+            eta.append(int(math.floor(ttc / D_sec)))
+            weight.append(1.0 / ttc)
         else:
-            schedule.append((job_id, None))   # deadline exhausted -> skip
+            eta.append(999)
+            weight.append(0.01)
+    urgent = [e <= 1 for e in eta]
 
-    return schedule, [1] * job_number
+    m_valid = [FIXED_MODEL_ID]
+
+    deadline_eff_ms = max(deadline_ms - SCHEDULER_OVERHEAD_MS, 0.0)
+
+    def fallback_schedule():
+        # Overload fallback: increasing TTC, fixed model, until
+        # the budget is exhausted; the rest are deferred.
+        order  = sorted(range(job_number), key=lambda j: ttc_list[j])
+        budget = deadline_eff_ms
+        assign = {}
+        for job_id in order:
+            if MODEL_EXEC_TIMES[FIXED_MODEL_ID] <= budget:
+                assign[job_id] = FIXED_MODEL_ID
+                budget -= MODEL_EXEC_TIMES[FIXED_MODEL_ID]
+        return [(j, assign.get(j, None)) for j in range(job_number)]
+
+    try:
+        model_g = gp.Model()
+        model_g.setParam("OutputFlag", 0)
+        model_g.setParam("Seed", 0)
+
+        x = {}
+        for job_id in range(job_number):
+            for model_id in m_valid:
+                x[job_id, model_id] = model_g.addVar(
+                    vtype=GRB.BINARY,
+                    name=f"x_{job_id}_{model_id}"
+                )
+        model_g.update()
+
+        obj = gp.LinExpr()
+        for job_id in range(job_number):
+            for model_id in m_valid:
+                obj += weight[job_id] * MODEL_ACCURACIES[model_id] * x[job_id, model_id]
+        model_g.setObjective(obj, GRB.MAXIMIZE)
+
+        for job_id in range(job_number):
+            s = gp.LinExpr()
+            for model_id in m_valid:
+                s += x[job_id, model_id]
+            if urgent[job_id]:
+                model_g.addConstr(s == 1, name=f"Mandatory_{job_id}")
+            else:
+                model_g.addConstr(s <= 1, name=f"Optional_{job_id}")
+
+        total_time = gp.LinExpr()
+        for job_id in range(job_number):
+            for model_id in m_valid:
+                total_time += MODEL_EXEC_TIMES[model_id] * x[job_id, model_id]
+        model_g.addConstr(total_time <= deadline_eff_ms, name="Deadline")
+
+        model_g.optimize()
+
+        if model_g.Status != GRB.OPTIMAL:
+            return fallback_schedule(), weight
+
+        schedule = []
+        for job_id in range(job_number):
+            selected = [
+                mid for mid in m_valid
+                if x[job_id, mid].X > 0.5
+            ]
+            schedule.append((job_id, selected[0] if selected else None))
+
+        return schedule, weight
+
+    except Exception as e:
+        print(f"[SOLVER]   Error: {e}")
+        return fallback_schedule(), weight
 
 # LABEL TAXONOMIES
 # Maps YOLOv5's COCO class indices onto our agent-type vocabulary
@@ -118,12 +185,17 @@ AGENT_CLASSES = [
     'MedVeh', 'LarVeh', 'Bus', 'EmVeh'
 ]
 BEHAVIOR_CLASSES = [
+    'MovAway', 'MovTow', 'Mov', 'Brake', 'Stop',
+    'IncatLft', 'IncatRht', 'HazLit', 'TurLft', 'TurRht',
+    'Ovtak', 'Wait2X', 'XingFmLft', 'XingFmRht', 'Xing', 'PushObj'
+]
+LEGACY_BEHAVIOR_CLASSES_7 = [
     'MovAway', 'MovTow', 'Mov', 'Stop',
     'IncatLft', 'Ovtak', 'PushObj'
 ]
 
 # Predicted behaviours that count as "dangerous" -- if a served object's
-DANGER_BEHAVIORS = {"MovTow", "Xing", "Stop"}
+DANGER_BEHAVIORS = {"MovTow", "Xing", "XingFmLft", "XingFmRht", "Stop"}
 
 # Bounding-box colour per agent type, for the on-screen HUD overlay.
 AGENT_COLORS = {
@@ -143,6 +215,8 @@ IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"[DEVICE]   Using {DEVICE}")
+
+RUN_DURATION_S = 100
 
 os.makedirs(RECORD_DIR, exist_ok=True)
 os.makedirs(LOG_DIR,    exist_ok=True)
@@ -298,6 +372,31 @@ def load_shufflenet_gru(pth_path, device, width_mult=1.0, int8=False):
     if "model_state_dict" in ckpt:
         if "agent_classes"    in ckpt: AGENT_CLASSES    = ckpt["agent_classes"]
         if "behavior_classes" in ckpt: BEHAVIOR_CLASSES = ckpt["behavior_classes"]
+    has_own_labels = ("model_state_dict" in ckpt and
+                      "behavior_classes" in ckpt)
+
+    sd = ckpt.get("model_state_dict", ckpt)
+    n_agent_ckpt = sd["agent_head.2.weight"].shape[0]    if "agent_head.2.weight"    in sd else None
+    n_beh_ckpt   = sd["behavior_head.3.weight"].shape[0] if "behavior_head.3.weight" in sd else None
+
+    if (n_beh_ckpt is not None and n_beh_ckpt != len(BEHAVIOR_CLASSES)
+            and not has_own_labels
+            and n_beh_ckpt == len(LEGACY_BEHAVIOR_CLASSES_7)):
+        print(f"  [WARN] {os.path.basename(pth_path)}: 7 behaviour outputs and "
+              f"no label list -> using legacy 7-class list (no 'Xing').")
+        BEHAVIOR_CLASSES = list(LEGACY_BEHAVIOR_CLASSES_7)
+
+    if n_agent_ckpt is not None and n_agent_ckpt != len(AGENT_CLASSES):
+        raise ValueError(
+            f"{pth_path}: checkpoint has {n_agent_ckpt} agent outputs but "
+            f"AGENT_CLASSES has {len(AGENT_CLASSES)}. Save 'agent_classes' "
+            f"in the checkpoint or fix the list.")
+    if n_beh_ckpt is not None and n_beh_ckpt != len(BEHAVIOR_CLASSES):
+        raise ValueError(
+            f"{pth_path}: checkpoint has {n_beh_ckpt} behaviour outputs but "
+            f"BEHAVIOR_CLASSES has {len(BEHAVIOR_CLASSES)}. Save "
+            f"'behavior_classes' in the checkpoint (same order as training) "
+            f"or fix the list.")
 
     model = ShuffleNetGRU(
         num_agent_classes    = len(AGENT_CLASSES),
@@ -334,7 +433,14 @@ load_alexnet_lstm = load_shufflenet_gru   # legacy alias
 print("[MODEL]    Loading ShuffleNetV2-GRU-TemporalAttention models...")
 base_model = load_shufflenet_gru(os.path.join(MODEL_DIR, '1.0.pth'), DEVICE, width_mult=1.0, int8=False)
 print(f"[MODEL]    Agent classes   : {AGENT_CLASSES}")
-print(f"[MODEL]    Behavior classes: {BEHAVIOR_CLASSES}")
+print(f"[MODEL]    Behavior classes ({len(BEHAVIOR_CLASSES)}): {BEHAVIOR_CLASSES}")
+_missing_danger = DANGER_BEHAVIORS - set(BEHAVIOR_CLASSES)
+if _missing_danger:
+    print(f"[WARN]     DANGER_BEHAVIORS not in the model's label set "
+          f"(can never trigger braking): {sorted(_missing_danger)}")
+else:
+    print(f"[MODEL]    DANGER_BEHAVIORS {sorted(DANGER_BEHAVIORS)} "
+          f"all present in label set")
 
 loaded_models = {}   # model registry 'name' -> loaded ShuffleNetGRU instance
 for reg in MODEL_REGISTRY:
@@ -344,6 +450,8 @@ for reg in MODEL_REGISTRY:
             width_mult=reg.get('width_mult', 1.0),
             int8=reg.get('int8', False))
         loaded_models[reg['name']] = m
+        assert len(BEHAVIOR_CLASSES) == base_model.behavior_head[-1].out_features, \
+            f"{reg['pth']} changed the label set to a different size than the base model"
         print(f"  [OK]   {reg['name']:30s} <- {reg['pth']}")
     except Exception as e:
         print(f"  [FAIL] {reg['name']:30s} : {e} — using base model")
@@ -408,7 +516,6 @@ def detect_agents_yolo(frame):
         cx = (x1 + x2) // 2
         cy = (y1 + y2) // 2
         agent_label = YOLO_CLASS_MAP[cls_int]
-        color       = AGENT_COLORS.get(agent_label, (200, 200, 200))
 
         detections.append({
             'box'        : (x1, y1, x2, y2),
@@ -417,14 +524,6 @@ def detect_agents_yolo(frame):
             'yolo_class' : cls_int,
             'agent_label': agent_label,
         })
-
-        cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(
-            annotated,
-            f"{agent_label} {conf:.2f}",
-            (x1, max(y1 - 10, 10)),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2
-        )
 
     return annotated, detections
 
@@ -655,9 +754,12 @@ def spawn_all_pedestrians(world, bp_lib, vehicle):
         random.uniform(PED_SPREAD_MIN, PED_SPREAD_MAX)
         for _ in range(TOTAL_PEDS)
     ])
+    n_crossing = TOTAL_PEDS // 5
+    n_standing = (TOTAL_PEDS * 2) // 5
+    n_walking  = TOTAL_PEDS - n_crossing - n_standing
     behaviours = (
-        ['standing'] * 4 + ['walking'] * 4 +
-        ['crossing'] * 2
+        ['standing'] * n_standing + ['walking'] * n_walking +
+        ['crossing'] * n_crossing
     )
     random.shuffle(behaviours)
     print(f"\n[SPAWN]    Spawning {TOTAL_PEDS} pedestrians")
@@ -879,117 +981,98 @@ def respawn_single_ahead(world, bp_lib, vehicle,
         print(f"[RESPAWN]  New ped {fwd_dist:.0f}m ahead | {behaviour}")
 
 
-def draw_hud(frame, speed_ms, n_yolo, n_agents,
-             n_moving, n_still, elapsed,
-             brake_active, vehicle_state,
-             intent_lines):
+def draw_hud(frame, speed_ms, brake_active=False):
     if frame is None:
         return None
     h, w    = frame.shape[:2]
     display = frame.copy()
 
-    cv2.putText(display, f"Speed      : {speed_ms:.2f} m/s",
-                (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (0, 255, 0), 2)
-    cv2.putText(display, f"State      : {vehicle_state}",
-                (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (0, 0, 255) if brake_active else (0, 255, 0), 2)
-    cv2.putText(display, f"YOLO       : {n_yolo} detected",
-                (10, 72), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (255, 255, 0), 2)
-    cv2.putText(display, f"Agents     : {n_agents} total",
-                (10, 94), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (200, 200, 255), 2)
-    cv2.putText(display, f"Moving     : {n_moving}",
-                (10, 116), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (0, 180, 255), 2)
-    cv2.putText(display, f"Still      : {n_still}",
-                (10, 138), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (180, 255, 180), 2)
-    cv2.putText(display, f"Time       : {elapsed:.1f}s",
-                (10, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (200, 200, 200), 2)
-    cv2.putText(display, f"Deadline   : {DEADLINE_MS:.0f}ms",
-                (10, 182), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
-                (255, 165, 0), 2)
-
-    panel_x = w - 360
-    cv2.rectangle(display, (panel_x - 8, 5), (w - 5, 18 + len(intent_lines) * 22),
-                  (20, 20, 20), -1)
-    cv2.rectangle(display, (panel_x - 8, 5), (w - 5, 18 + len(intent_lines) * 22),
-                  (80, 80, 80), 1)
-
-    cv2.putText(display, "PREDICTED BEHAVIOR (+1s)",
-                (panel_x, 20),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1)
-
-    for i, line in enumerate(intent_lines):
-        cv2.putText(display, line, (panel_x, 40 + i * 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 220, 60), 1)
+    speed_text = f"Speed: {speed_ms:.2f} m/s"
+    (tw, th), baseline = cv2.getTextSize(
+        speed_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2
+    )
+    pad_x, pad_y = 8, 6
+    x0, y0 = 10, 15
+    cv2.rectangle(
+        display,
+        (x0, y0),
+        (x0 + tw + 2 * pad_x, y0 + th + 2 * pad_y + baseline),
+        (0, 0, 0), -1
+    )
+    cv2.putText(
+        display, speed_text,
+        (x0 + pad_x, y0 + th + pad_y),
+        cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+        (0, 255, 0), 2
+    )
 
     if brake_active:
-        cv2.rectangle(display, (0, h - 50), (w, h),
-                      (0, 0, 150), -1)
-        cv2.putText(display,
-                    "!!! VEHICLE BRAKING -- DANGER DETECTED !!!",
-                    (10, h - 14),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.75,
-                    (255, 255, 255), 2)
+        banner  = "BRAKE PRESSED!"
+        (bw, bh), bbase = cv2.getTextSize(
+            banner, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3
+        )
+        bpad    = 10
+        bx      = (w - bw) // 2 - bpad
+        by      = h - bh - 2 * bpad - bbase
+        cv2.rectangle(
+            display,
+            (bx, by),
+            (bx + bw + 2 * bpad, h - bpad),
+            (0, 0, 0), -1
+        )
+        cv2.putText(
+            display, banner,
+            (bx + bpad, h - bpad - bbase - 4),
+            cv2.FONT_HERSHEY_SIMPLEX, 1.0,
+            (0, 255, 0), 3
+        )
 
     return display
 
 
-def draw_prediction_on_frame(display, det, agent_pred,
-                              beh_pred, beh_conf,
-                              model_name=""):
-    if det is None:
+def draw_prediction_on_frame(display, det,
+                              agent_pred, beh_pred,
+                              beh_conf, model_name,
+                              is_danger=False):
+    if display is None or det is None:
+        return display
+    x1, y1, x2, y2 = det['box']
+    col       = AGENT_COLORS["Ped"]
+    thickness = 3 if is_danger else 2
+    cv2.rectangle(display, (x1, y1), (x2, y2), col, thickness)
+
+    if beh_pred in ("buffering...", "buffering",
+                    "skipped", "Skipped", ""):
         return display
 
-    x1, y1, x2, y2 = det['box']
-    color = (0, 220, 60)
+    short = model_name.replace("ShuffleNetV2x", "ShuffleNet-")
 
-    cv2.rectangle(display, (x1, y1), (x2, y2), color, 2)
+    font       = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.55
+    thickness2 = 2
 
-    if beh_conf > 0:
-        line1 = f"{agent_pred}->{beh_pred} {beh_conf:.0%}"
-    else:
-        line1 = f"{agent_pred}->{beh_pred}"
+    line1 = short
+    line2 = beh_pred
 
-    short_model = model_name[:14] if model_name else ""
-    line2 = f"[{short_model}]" if short_model else ""
+    (w1, h1), _ = cv2.getTextSize(line1, font, font_scale, thickness2)
+    (w2, h2), _ = cv2.getTextSize(line2, font, font_scale, thickness2)
+    pad   = 3
+    box_w = max(w1, w2) + pad * 2
+    box_h = h1 + h2 + pad * 3
 
-    (lw1, lh1), _ = cv2.getTextSize(
-        line1, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1
-    )
-    (lw2, lh2), _ = cv2.getTextSize(
-        line2, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1
-    ) if line2 else ((0, 0), None)
+    tx = x1
+    ty = max(y1 - box_h - 4, 0)
+    cv2.rectangle(display, (tx, ty),
+                  (tx + box_w, ty + box_h), (0, 0, 0), -1)
 
-    box_w  = max(lw1, lw2) + 8
-    box_h  = lh1 + (lh2 + 4 if line2 else 0) + 8
-    ty     = max(y1 - box_h - 2, 0)
-
-    cv2.rectangle(display,
-                  (x1, ty), (x1 + box_w, ty + box_h),
-                  (10, 10, 10), -1)
-    cv2.rectangle(display,
-                  (x1, ty), (x1 + box_w, ty + box_h),
-                  color, 1)
-
-    cv2.putText(display, line1,
-                (x1 + 3, ty + lh1 + 3),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
-
-    if line2:
-        cv2.putText(display, line2,
-                    (x1 + 3, ty + lh1 + lh2 + 7),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.38,
-                    (180, 180, 180), 1)
-
+    cv2.putText(display, line1, (tx + pad, ty + pad + h1),
+                font, font_scale, col, thickness2)
+    cv2.putText(display, line2, (tx + pad, ty + pad + h1 + h2 + pad),
+                font, font_scale, col, thickness2)
     return display
 
 
-def main():
+def run_episode(duration_sec: float = RUN_DURATION_S) -> bool:
     global video_writer, record_path
 
     # ── Connect to the running CARLA server (must be started separately) ──
@@ -1010,6 +1093,15 @@ def main():
     col_sensor  = None
     csv_file    = None
     detail_log_file = None
+
+    crashed = [False]
+
+    def on_collision(event):
+        if crashed[0]:
+            return
+        crashed[0] = True
+        print(f"\n  !! CRASH -- run ending "
+              f"(hit {event.other_actor.type_id})\n")
 
     try:
         vehicle_bp = bp_lib.filter('vehicle.tesla.model3')[0]
@@ -1039,11 +1131,7 @@ def main():
         col_sensor = world.spawn_actor(
             col_bp, carla.Transform(), attach_to=vehicle
         )
-        col_sensor.listen(
-            lambda e: print(
-                f"\n  !! COLLISION with {e.other_actor.type_id} !!\n"
-            )
-        )
+        col_sensor.listen(on_collision)
 
         # ── Traffic Manager: governs autopilot behaviour for every
         tm = client.get_trafficmanager(TM_PORT)
@@ -1113,18 +1201,20 @@ def main():
         print(f"  Cyclists         : {TOTAL_BICYCLES}")
         print(f"  Buses            : {TOTAL_BUSES}")
         print(f"  Large vehicles   : {TOTAL_TRUCKS}")
+        print(f"  Duration cap     : {duration_sec:.0f}s (or until crash)")
         print(f"  Deadline         : {DEADLINE_MS} ms per cycle")
         print(f"  Models           : {MODEL_NUMBER}")
         print(f"  Agent classes    : {AGENT_CLASSES}")
         print(f"  Behavior classes : {BEHAVIOR_CLASSES}")
         print(f"  Danger behaviors : {DANGER_BEHAVIORS}")
         print(f"  Fixed model      : {FIXED_MODEL_NAME}")
-        print(f"  Scheduler        : TTC-priority, fixed model (no ILP)")
+        print(f"  Scheduler        : Gurobi ILP restricted to the fixed model")
         print("  Press Q to quit")
         print("="*65 + "\n")
 
         start_time       = time.time()
         was_braking      = False
+        brake_hold_start_time = None
         brake_hold       = False   # latches the brake across cycles until
         ped_counter      = TOTAL_PEDS + 1
         detections       = []
@@ -1134,6 +1224,16 @@ def main():
         while True:
             now     = time.time()
             elapsed = now - start_time
+
+            if elapsed >= duration_sec:
+                print(f"\n[RUN] Duration reached "
+                      f"({duration_sec:.0f}s) -- ending episode.")
+                break
+
+            if crashed[0]:
+                print(f"\n[RUN] Crash detected -- "
+                      f"ending episode early at {elapsed:.1f}s.")
+                break
 
             # Periodically nudge any vehicle that's genuinely stuck (not
             if now - last_unstick_check > UNSTICK_INTERVAL:
@@ -1497,11 +1597,12 @@ def main():
                         'behavior_conf' : round(beh_conf, 3),
                     })
 
-                    if (beh_pred in DANGER_BEHAVIORS and
-                            dist < BRAKE_DIST and
-                            beh_conf >= CONF_THRESHOLD and
-                            not cross_done and
-                            model_id is not None):
+                    is_danger = (beh_pred in DANGER_BEHAVIORS and
+                                 dist < BRAKE_DIST and
+                                 beh_conf >= CONF_THRESHOLD and
+                                 not cross_done and
+                                 model_id is not None)
+                    if is_danger:
                         brake_active  = True
                         vehicle_state = "BRAKING"
 
@@ -1510,7 +1611,7 @@ def main():
                         display_frame = draw_prediction_on_frame(
                             display_frame, det,
                             agent_pred, beh_pred, beh_conf,
-                            display_model
+                            display_model, is_danger
                         )
 
                     warn = "!" if (brake_active and
@@ -1583,6 +1684,8 @@ def main():
 
             # ── STAGE 5: CONTROL -- brake-hold latch.
             if brake_active:
+                if not brake_hold:
+                    brake_hold_start_time = time.time()
                 brake_hold = True
             elif brake_hold:
                 still_danger = any(
@@ -1592,7 +1695,8 @@ def main():
                     for va in visible_agents
                 )
                 if not still_danger:
-                    brake_hold = False
+                    brake_hold            = False
+                    brake_hold_start_time = None
 
             # Override the Traffic Manager's autopilot with a manual full
             if brake_hold:
@@ -1606,14 +1710,13 @@ def main():
             else:
                 vehicle.set_autopilot(True, TM_PORT)
 
+            show_brake_banner = (
+                brake_hold and
+                brake_hold_start_time is not None and
+                (time.time() - brake_hold_start_time) >= 1.0
+            )
             if display_frame is not None:
-                hud = draw_hud(
-                    display_frame, speed_ms, n_yolo,
-                    len(pedestrians) + len(road_vehicles),
-                    n_moving, n_still,
-                    elapsed, brake_active, vehicle_state,
-                    intent_lines
-                )
+                hud = draw_hud(display_frame, speed_ms, show_brake_banner)
                 if hud is not None:
                     cv2.imshow(
                         "CARLA - RETINA-High (Fixed ShuffleNet-1.0) Baseline",
@@ -1681,6 +1784,26 @@ def main():
 
         print("Done.")
 
+    return crashed[0]
+
+
+def run_single():
+    crashed = run_episode(duration_sec=RUN_DURATION_S)
+
+    summary_dir = os.path.join(LOG_DIR, "RETINA-High")
+    os.makedirs(summary_dir, exist_ok=True)
+    summary_path = os.path.join(summary_dir, "retina_high_runs.csv")
+    is_new = not os.path.exists(summary_path)
+    with open(summary_path, 'a', newline='') as f:
+        writer = csv.writer(f)
+        if is_new:
+            writer.writerow(['timestamp', 'crashed'])
+        writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), int(crashed)])
+
+    print(f"\n[RESULT]   {'CRASHED' if crashed else 'safe'}  "
+          f"-> appended to {summary_path}")
+    return crashed
+
 
 if __name__ == '__main__':
-    main()
+    run_single()
