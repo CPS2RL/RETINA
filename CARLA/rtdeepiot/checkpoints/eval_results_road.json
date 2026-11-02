@@ -1,0 +1,23 @@
+{
+  "total_samples": 7396,
+  "per_stage": [
+    {
+      "stage": 1,
+      "accuracy": 32.6122,
+      "ece": 0.184,
+      "avg_conf": 0.4496
+    },
+    {
+      "stage": 2,
+      "accuracy": 39.0211,
+      "ece": 0.1896,
+      "avg_conf": 0.3694
+    },
+    {
+      "stage": 3,
+      "accuracy": 50.7166,
+      "ece": 0.2723,
+      "avg_conf": 0.3835
+    }
+  ]
+}

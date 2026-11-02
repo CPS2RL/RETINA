@@ -1,0 +1,11 @@
+{
+  "stage_1_mean_ms": 0.9596,
+  "stage_1_std_ms": 0.0894,
+  "stage_1_wcet_ms": 1.3254,
+  "stage_2_mean_ms": 1.7697,
+  "stage_2_std_ms": 0.0998,
+  "stage_2_wcet_ms": 2.1704,
+  "stage_3_mean_ms": 2.7176,
+  "stage_3_std_ms": 0.1218,
+  "stage_3_wcet_ms": 3.1391
+}
